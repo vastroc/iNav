@@ -2,15 +2,15 @@
 
 一个极简的公开网址导航站，整套服务跑在 **Cloudflare Workers + D1** 上：前台、后台、API、数据库都在一个 Worker 里，不需要服务器，也没有 React 之类的运行时框架。
 
+![首页](docs/preview-home.png)
+
+## 一键部署
+
 <p align="center">
   <a href="https://deploy.workers.cloudflare.com/?url=https://github.com/vastroc/iNav">
     <img src="https://deploy.workers.cloudflare.com/button" alt="Deploy to Cloudflare" />
   </a>
 </p>
-
-![首页](docs/preview-home.png)
-
-## 一键部署
 
 点上面的按钮，全程在浏览器里完成：不用装 Node、不用命令行、也不用先在本机跑起来。
 
