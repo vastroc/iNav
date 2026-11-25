@@ -22,25 +22,42 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      # 用 Workers Builds 部署时不需要这个工作流：Token 为空就整段跳过，避免 push 后一片红。
+      - name: Check credentials
+        id: creds
+        env:
+          TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [ -n "$TOKEN" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "CLOUDFLARE_API_TOKEN 未配置，跳过 Action 部署（用 Workers Builds 时属预期行为）。"
+          fi
+
       - name: Checkout
+        if: steps.creds.outputs.ready == 'true'
         uses: actions/checkout@v4
 
       - name: Setup Node
+        if: steps.creds.outputs.ready == 'true'
         uses: actions/setup-node@v4
         with:
           node-version-file: .nvmrc
           cache: npm
 
       - name: Install dependencies
+        if: steps.creds.outputs.ready == 'true'
         run: npm ci
 
-      - name: Typecheck
-        run: npm run typecheck
-
-      - name: Build static assets
-        run: npx vite build
+      # 走 npm run build（= typecheck + icons:check + vite build），与本地 npm run deploy 同一入口。
+      # 图标产物（public/icons/*.svg 等）已随仓库提交，构建不再重新生成；
+      # icons:check 负责在「改了 lucide-groups.json 却没重新生成」时当场失败，避免上线后图标空白。
+      - name: Typecheck & build
+        if: steps.creds.outputs.ready == 'true'
+        run: npm run build
 
       - name: Apply D1 migrations
+        if: steps.creds.outputs.ready == 'true'
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -48,6 +65,7 @@ jobs:
           command: d1 migrations apply DB --remote
 
       - name: Deploy Worker
+        if: steps.creds.outputs.ready == 'true'
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}

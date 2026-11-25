@@ -1,5 +1,6 @@
 import "./styles.css";
 import { categoryIcon } from "../lib/categoryIcons";
+import { formatDate, timeAgo } from "../lib/datetime";
 import { renderMarkdown } from "../lib/markdown";
 import type {
   CaptchaChallenge,
@@ -7,6 +8,7 @@ import type {
   CommentSubmitResult,
   CommentsPayload,
   NavPayload,
+  PageViewKind,
   PublicComment,
   PublicPage,
   RecentComment,
@@ -17,7 +19,8 @@ import type {
 const appRoot = document.getElementById("app")!;
 
 type Theme = "light" | "dark";
-type SortMode = "manual" | "name" | "views";
+type SortMode = "manual" | "name" | "jumps";
+type SortDir = "asc" | "desc";
 
 interface CommentValues {
   author: string;
@@ -91,42 +94,29 @@ function compact(value: number | null | undefined): string {
   return (n / 10000).toFixed(n >= 100000 ? 0 : 1) + "万";
 }
 
-function parseDate(value: string | null | undefined): Date | null {
-  if (!value) return null;
-  let normalized = value.trim();
-  if (!normalized.includes("T")) normalized = normalized.replace(" ", "T") + "Z";
-  else if (!/[zZ]|[+-]\d{2}:?\d{2}$/.test(normalized)) normalized += "Z";
-  const date = new Date(normalized);
-  return Number.isNaN(date.getTime()) ? null : date;
-}
-
-function formatDate(value: string | null | undefined): string {
-  const date = parseDate(value);
-  if (!date) return "—";
-  return date.toLocaleDateString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" });
-}
-
-function timeAgo(value: string | null | undefined): string {
-  const date = parseDate(value);
-  if (!date) return "";
-  const seconds = Math.max(1, Math.floor((Date.now() - date.getTime()) / 1000));
-  if (seconds < 60) return "刚刚";
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return minutes + " 分钟前";
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return hours + " 小时前";
-  const days = Math.floor(hours / 24);
-  if (days < 30) return days + " 天前";
-  const months = Math.floor(days / 30);
-  if (months < 12) return months + " 个月前";
-  return Math.floor(months / 12) + " 年前";
-}
-
 function eyeIcon(): string {
   return (
     '<svg class="eye-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
     '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/>' +
     "</svg>"
+  );
+}
+
+/** 外链跳转图标（方框 + 出框箭头），与眼睛图标区分：跳转是离开本站，浏览是停在本页 */
+function jumpIcon(): string {
+  return (
+    '<svg class="jump-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>' +
+    "</svg>"
+  );
+}
+
+/** 详情页统计徽标：桌面用完整文案，移动端换成精简文案（少几个字，三个徽标才排得进一行） */
+function detailBadge(icon: string, title: string, full: string, mini: string): string {
+  return (
+    '<span class="detail-view-badge" title="' + esc(title) + '">' + icon +
+    '<span class="badge-full">' + full + "</span>" +
+    '<span class="badge-mini">' + mini + "</span></span>"
   );
 }
 
@@ -199,6 +189,24 @@ function themeIcon(theme: Theme): string {
   );
 }
 
+/** 移动端分类入口：汉堡图标，尺寸与右侧主题按钮一致 */
+function menuIcon(): string {
+  return (
+    '<svg class="menu-svg" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M4 7h16M4 12h16M4 17h16"/>' +
+    "</svg>"
+  );
+}
+
+/** 抽屉右上角的关闭图标，尺寸与菜单按钮同款 */
+function closeIcon(): string {
+  return (
+    '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" aria-hidden="true">' +
+    '<path d="M6 6l12 12M18 6 6 18"/>' +
+    "</svg>"
+  );
+}
+
 function applyTheme(theme: Theme): void {
   state.theme = theme;
   document.documentElement.dataset.theme = theme;
@@ -230,9 +238,9 @@ function trackJump(siteId: number): void {
   });
 }
 
-function trackView(path: string): void {
+function trackView(kind: PageViewKind, id = 0): void {
   try {
-    const key = "inav:view:" + path;
+    const key = "inav:view:" + kind + ":" + id;
     if (sessionStorage.getItem(key)) return;
     sessionStorage.setItem(key, "1");
   } catch {
@@ -241,10 +249,16 @@ function trackView(path: string): void {
   void fetch("/api/views", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path }),
+    body: JSON.stringify({ kind, id }),
     keepalive: true,
     credentials: "same-origin",
   }).catch(() => undefined);
+}
+
+/** 首页和关于页也是 pages 里的行，按 slug 找到各自的 id 再上报 */
+function trackPageView(slug: string): void {
+  const id = (state.nav?.pages ?? []).find((page) => page.slug === slug)?.id;
+  if (id) trackView("page", id);
 }
 
 function flattenCategories(categories: Category[]): Category[] {
@@ -302,6 +316,19 @@ function homeHref(changes: Record<string, string | null>): string {
   return query ? "/?" + query : "/";
 }
 
+function parseSort(value: string | null): SortMode {
+  return value === "name" || value === "jumps" ? value : "manual";
+}
+
+/** 默认方向：时间（添加时间）降序、名称升序、浏览量降序 */
+function defaultSortDir(mode: SortMode): SortDir {
+  return mode === "name" ? "asc" : "desc";
+}
+
+function parseSortDir(value: string | null, mode: SortMode): SortDir {
+  return value === "asc" || value === "desc" ? value : defaultSortDir(mode);
+}
+
 function tagHref(tag: string): string {
   return "/?tag=" + encodeURIComponent(tag);
 }
@@ -319,29 +346,41 @@ function themeButton(): string {
   );
 }
 
+type NavLink = { href: string; title: string; active: boolean };
+
+/**
+ * 顶部导航与移动端抽屉共用的导航项：首页 + 后台设为「显示在导航」的独立页面 + 关于。
+ * limitPages 只限制页面数量（桌面顶栏放不下），抽屉里全量展示。
+ */
+function navLinks(limitPages?: number): NavLink[] {
+  const path = location.pathname.replace(/\/+$/, "") || "/";
+  const pages = (state.nav?.pages ?? []).filter((page) => page.showInNav);
+  const shown = typeof limitPages === "number" ? pages.slice(0, limitPages) : pages;
+  const links: NavLink[] = [{ href: "/", title: "首页", active: path === "/" }];
+  for (const page of shown) {
+    const href = "/page/" + encodeURIComponent(page.slug);
+    links.push({ href, title: page.title, active: path === href });
+  }
+  links.push({ href: "/about", title: "关于", active: path === "/about" });
+  return links;
+}
+
 function renderHeader(): string {
   const settings = state.nav?.settings;
-  const pages = (state.nav?.pages ?? []).filter((page) => page.showInNav).slice(0, 6);
-  const path = location.pathname.replace(/\/+$/, "") || "/";
-  const pageLinks = pages
-    .map((page) => {
-      const href = "/page/" + encodeURIComponent(page.slug);
-      const active = path === href;
-      return '<a href="' + href + '" data-link' + (active ? ' class="active"' : "") + ">" + esc(page.title) + "</a>";
-    })
+  const pageLinks = navLinks(6)
+    .map((link) => '<a href="' + link.href + '" data-link' + (link.active ? ' class="active"' : "") + ">" + esc(link.title) + "</a>")
     .join("");
   return (
     '<header class="top"><div class="wrap top-inner">' +
+    '<button type="button" class="top-menu" data-action="open-cats" aria-label="打开菜单" aria-expanded="false" aria-controls="site-drawer" title="菜单">' +
+    menuIcon() +
+    "</button>" +
     '<a class="brand" href="/" data-link><span class="brand-mark">' +
     esc((settings?.siteName ?? "锦囊书签").slice(0, 1)) +
     "</span><span>" +
     esc(settings?.siteName ?? "锦囊书签") +
     "</span></a>" +
-    '<nav class="nav">' +
-    '<a href="/" data-link' + (path === "/" ? ' class="active"' : "") + ">首页</a>" +
-    pageLinks +
-    '<a href="/about" data-link' + (path === "/about" ? ' class="active"' : "") + ">关于</a>" +
-    "</nav>" +
+    '<nav class="nav">' + pageLinks + "</nav>" +
     '<div class="top-links">' + themeButton() + "</div></div></header>"
   );
 }
@@ -362,15 +401,17 @@ function renderFooter(): string {
 }
 
 function shell(main: string, title: string, description?: string): void {
+  // 首页（含按分类/标签筛选）才有分类可筛；独立页面只给导航
+  const isHome = (location.pathname.replace(/\/+$/, "") || "/") === "/";
   appRoot.innerHTML =
     renderHeader() +
     "<main>" +
     main +
     "</main>" +
     renderFooter() +
-    '<button type="button" class="floating-cats" data-action="open-cats">' +
-    categoryIcon("layout") +
-    "分类</button>";
+    renderDrawer(isHome);
+  // 重渲染后按钮是新的，把抽屉开关状态同步回 aria-expanded
+  setDrawer(document.body.classList.contains("cats-open"));
   document.title = title;
   const settings = state.nav?.settings;
   setMeta("description", description || settings?.siteDescription || "");
@@ -378,17 +419,24 @@ function shell(main: string, title: string, description?: string): void {
   setMeta("og:description", description || settings?.siteDescription || "", true);
 }
 
+/** 抽屉开关：同时维护菜单按钮的 aria-expanded */
+function setDrawer(open: boolean): void {
+  document.body.classList.toggle("cats-open", open);
+  document.querySelector<HTMLElement>(".top-menu")?.setAttribute("aria-expanded", open ? "true" : "false");
+}
+
 function navigate(url: string, replace = false): void {
   if (replace) history.replaceState(null, "", url);
   else history.pushState(null, "", url);
   state.more = 120;
-  document.body.classList.remove("cats-open");
+  setDrawer(false);
   window.scrollTo(0, 0);
   void renderRoute();
 }
 
 async function boot(): Promise<void> {
   appRoot.innerHTML = '<div class="boot">正在加载站点索引…</div>';
+  watchCardTagOverflow();
   try {
     const nav = await api<NavPayload>("/api/nav");
     state.nav = nav;
@@ -409,12 +457,11 @@ async function renderRoute(): Promise<void> {
   const path = location.pathname.replace(/\/+$/, "") || "/";
   if (path === "/") {
     renderHome();
-    trackView("/");
+    trackPageView("home");
     return;
   }
   if (path === "/about") {
-    renderAbout();
-    trackView("/about");
+    await renderAbout();
     return;
   }
   const siteMatch = path.match(/^\/site\/([^/]+)$/);
@@ -466,11 +513,9 @@ function renderCategoryNodes(categories: Category[], selectedSlug: string | null
     .join("");
 }
 
-function renderSidebar(categories: Category[], selectedSlug: string | null, totalSites: number): string {
+/** 分类列表：桌面侧栏与移动端抽屉共用 */
+function renderCategoryList(categories: Category[], selectedSlug: string | null, totalSites: number): string {
   return (
-    '<button type="button" class="sidebar-scrim" data-action="close-cats" aria-label="关闭分类"></button>' +
-    '<aside class="sidebar" aria-label="站点分类">' +
-    '<div class="sidebar-head"><button type="button" class="sidebar-close" data-action="close-cats">关闭</button></div>' +
     '<ul class="cat-list">' +
     '<li><a class="cat-all' + (selectedSlug ? "" : " active") + '" href="/" data-link><span class="cat-icon-wrap">' +
     categoryIcon("layout") +
@@ -478,18 +523,56 @@ function renderSidebar(categories: Category[], selectedSlug: string | null, tota
     num(totalSites) +
     "</span></a></li>" +
     renderCategoryNodes(categories, selectedSlug) +
-    "</ul></aside>"
+    "</ul>"
+  );
+}
+
+/** 桌面端左侧常驻分类栏（≤900px 隐藏，改由抽屉承载） */
+function renderSidebar(categories: Category[], selectedSlug: string | null, totalSites: number): string {
+  return '<aside class="sidebar" aria-label="站点分类">' + renderCategoryList(categories, selectedSlug, totalSites) + "</aside>";
+}
+
+/**
+ * 移动端抽屉（≤900px 使用）：导航链接固定在最上方，分类只在首页出现。
+ * 独立页面（详情 / 单页 / 关于）没有分类语境，只给导航，避免点进分类跳回首页。
+ */
+function renderDrawer(showCategories: boolean): string {
+  const nav = state.nav;
+  const links = navLinks()
+    .map(
+      (link) =>
+        '<a class="drawer-link' + (link.active ? " active" : "") + '" href="' + link.href + '" data-link title="' +
+        esc(link.title) + '">' + esc(link.title) + "</a>"
+    )
+    .join("");
+  const selectedSlug = new URLSearchParams(location.search).get("cat");
+  const cats =
+    showCategories && nav ? '<p class="drawer-label">分类</p>' + renderCategoryList(nav.categories, selectedSlug, nav.stats.totalSites) : "";
+  return (
+    '<button type="button" class="sidebar-scrim" data-action="close-cats" aria-label="关闭菜单"></button>' +
+    '<aside class="drawer" id="site-drawer" aria-label="站点导航">' +
+    '<div class="drawer-head"><span class="drawer-title">' +
+    esc(nav?.settings.siteName ?? "锦囊书签") +
+    '</span><button type="button" class="drawer-close" data-action="close-cats" aria-label="关闭菜单" title="关闭">' +
+    closeIcon() +
+    "</button></div>" +
+    '<div class="drawer-body">' +
+    '<p class="drawer-label">导航</p>' +
+    '<div class="drawer-nav">' + links + "</div>" +
+    cats +
+    "</div></aside>"
   );
 }
 
 function renderCard(site: Site, showCategory: boolean): string {
   const icon = faviconFor(site);
   const description = site.description || "暂无简介。";
+  // “AI 生成”标签固定排在第一位
+  const aiTag = site.aiGenerated ? '<span class="tag ai" title="简介由 AI 生成">AI 生成</span>' : "";
+  // 全部标签都渲染，装不下时靠轮播完整展示，不再截断成“前 3 个 + N”
   const tags = site.tags
-    .slice(0, 3)
     .map((tag) => '<a class="tag" href="' + esc(tagHref(tag)) + '" data-link>' + esc(tag) + "</a>")
     .join("");
-  const moreTags = site.tags.length > 3 ? '<span class="tag">+' + (site.tags.length - 3) + "</span>" : "";
   const category = showCategory && site.categoryName
     ? '<a class="card-cat" href="/?cat=' + encodeURIComponent(site.categorySlug) + '" data-link title="查看分类：' +
       esc(site.categoryName) +
@@ -498,9 +581,10 @@ function renderCard(site: Site, showCategory: boolean): string {
       esc(site.categoryName) +
       "</a>"
     : "";
-  const detail = site.detailEnabled
-    ? '<a class="detail-link" href="/site/' + encodeURIComponent(site.slug) + '" data-link>查看详情</a>'
-    : "";
+  // 所有书签都开放详情页（是否可见/是否开放已不再作为配置项）
+  // 详情页在新标签打开：不带 data-link，交给浏览器默认行为（data-link 会被 SPA 路由拦截成同标签跳转）
+  const detail =
+    '<a class="detail-link" href="/site/' + encodeURIComponent(site.slug) + '" target="_blank" rel="noopener noreferrer">查看详情</a>';
   return (
     '<article class="card">' +
     '<a class="card-body" href="' + esc(site.url) + '" target="_blank" rel="noopener noreferrer" data-site-jump="' + site.id + '">' +
@@ -514,14 +598,45 @@ function renderCard(site: Site, showCategory: boolean): string {
     '<p class="card-desc">' + esc(description) + "</p>" +
     "</a>" +
     '<div class="card-corner">' +
-    '<span class="corner-stat" title="浏览量 ' + num(site.views) + '">' +
-    eyeIcon() + compact(site.views) +
+    '<span class="corner-stat" title="跳转次数 ' + num(site.jumps) + '">' +
+    jumpIcon() + compact(site.jumps) +
     "</span></div>" +
     (category ? '<div class="card-cat-row">' + category + "</div>" : "") +
-    '<div class="card-bottom"><div class="card-tags"><div class="tag-track">' + tags + moreTags + (site.aiGenerated ? '<span class="tag ai" title="简介由 AI 生成">AI 生成</span>' : "") + "</div></div>" +
+    '<div class="card-bottom"><div class="card-tags"><div class="tag-track">' + aiTag + tags + "</div></div>" +
     detail +
     "</div></article>"
   );
+}
+
+/** 标签轮播的恒定速度（px/s）：取原 ease-in-out 往返动画中点峰值 20 × 1.724 ≈ 34.5 */
+const TAG_SCROLL_SPEED = 34.5;
+/** 位移极小时的最短时长，避免来回抖动得像闪屏 */
+const TAG_SCROLL_MIN_SECONDS = 0.9;
+
+/** 标签是否真的装不下：只有装不下才启用轮播；每次重新判定，避免字体/宽度变化后残留旧结论 */
+function measureCardTags(card: HTMLElement): void {
+  const box = card.querySelector<HTMLElement>(".card-tags");
+  const track = box?.querySelector<HTMLElement>(".tag-track");
+  if (!box || !track) return;
+  const visible = box.getBoundingClientRect().width;
+  if (visible <= 0) return; // 布局还没完成，等下一次测量
+  const content = Math.max(track.getBoundingClientRect().width, track.scrollWidth);
+  const overflow = Math.ceil(content - visible);
+  if (overflow > 1) {
+    const distance = overflow + 4;
+    box.classList.add("is-overflow");
+    box.style.setProperty("--tag-shift", "-" + distance + "px");
+    // linear + 时长 = 距离 / 速度 → 全程恒速（不再两头慢中间快）
+    box.style.setProperty("--tag-duration", Math.max(TAG_SCROLL_MIN_SECONDS, distance / TAG_SCROLL_SPEED).toFixed(2) + "s");
+  } else {
+    box.classList.remove("is-overflow");
+    box.style.removeProperty("--tag-shift");
+    box.style.removeProperty("--tag-duration");
+  }
+}
+
+function refreshCardTags(): void {
+  document.querySelectorAll<HTMLElement>(".card").forEach(measureCardTags);
 }
 
 function prepareCardEnhancements(): void {
@@ -530,20 +645,98 @@ function prepareCardEnhancements(): void {
     if (desc && desc.scrollHeight > desc.clientHeight + 1) {
       card.title = desc.textContent ?? "";
     }
-    const box = card.querySelector<HTMLElement>(".card-tags");
-    const track = box?.querySelector<HTMLElement>(".tag-track");
-    if (!box || !track) return;
-    const overflow = track.scrollWidth - box.clientWidth;
-    if (overflow > 2) {
-      box.classList.add("is-overflow");
-      box.style.setProperty("--tag-shift", "-" + (overflow + 4) + "px");
-    }
+    measureCardTags(card);
   });
+  // 字体加载/首次布局可能改变宽度，下一帧再复测一次
+  requestAnimationFrame(refreshCardTags);
+}
+
+/** 标签栏最多展示 3 行，超出折叠并显示「展开全部」；按真实换行位置测量，不依赖固定行高 */
+const TAG_BAR_ROWS = 3;
+let tagsExpanded = false;
+
+/** 字体加载、窗口缩放、横竖屏切换后重新判定，保证“装不下才轮播”始终成立 */
+function watchCardTagOverflow(): void {
+  let frame = 0;
+  const schedule = (): void => {
+    if (frame) cancelAnimationFrame(frame);
+    frame = requestAnimationFrame(() => {
+      frame = 0;
+      refreshCardTags();
+      setupTagsBar();
+    });
+  };
+  window.addEventListener("resize", schedule, { passive: true });
+  window.addEventListener("orientationchange", schedule, { passive: true });
+  if (document.fonts) void document.fonts.ready.then(schedule);
+}
+
+/** 标签栏最多展示 3 行，超出折叠，并把「展开剩余」按钮插在第三行末尾；按真实换行位置测量 */
+function setupTagsBar(): void {
+  const list = document.querySelector<HTMLElement>("[data-tags-list]");
+  const toggle = document.querySelector<HTMLButtonElement>('[data-action="toggle-tags"]');
+  if (!list || !toggle) return;
+
+  // 按钮先挂回列表末尾并隐藏，保证测量时不影响换行
+  if (toggle.parentElement !== list) list.appendChild(toggle);
+  toggle.hidden = true;
+  const tags = (Array.from(list.children) as HTMLElement[]).filter((el) => el !== toggle);
+  if (!tags.length) return;
+
+  // 先解除折叠再测量，避免上一次的 max-height 影响换行结果
+  list.style.maxHeight = "none";
+  const tops: number[] = [];
+  for (const tag of tags) {
+    if (!tops.includes(tag.offsetTop)) tops.push(tag.offsetTop);
+  }
+  tops.sort((a, b) => a - b);
+
+  if (tops.length <= TAG_BAR_ROWS) {
+    tagsExpanded = false;
+    list.style.maxHeight = "";
+    toggle.textContent = "展开全部";
+    toggle.setAttribute("aria-expanded", "false");
+    return;
+  }
+
+  const foldTop = tops[TAG_BAR_ROWS - 1];
+
+  if (tagsExpanded) {
+    // 展开后把「收起」放到最后一个标签之后
+    toggle.textContent = "收起";
+    toggle.setAttribute("aria-expanded", "true");
+    toggle.hidden = false;
+    list.appendChild(toggle);
+    list.style.maxHeight = list.scrollHeight + "px";
+    return;
+  }
+
+  // 折叠：按钮插到第三行最后一个标签之后；这一行放不下就往前挪一个标签再试
+  let index = tags.length - 1;
+  while (index > 0 && tags[index].offsetTop !== foldTop) index -= 1;
+  const label = (at: number): string => "展开剩余 " + num(tags.length - at - 1) + " 个";
+  toggle.hidden = false;
+  toggle.setAttribute("aria-expanded", "false");
+  toggle.textContent = label(index);
+  tags[index].after(toggle);
+  let guard = 0;
+  while (toggle.offsetTop > foldTop && index > 0 && guard < 60) {
+    guard += 1;
+    index -= 1;
+    toggle.textContent = label(index);
+    tags[index].after(toggle);
+  }
+
+  let foldBottom = 0;
+  for (const el of Array.from(list.children) as HTMLElement[]) {
+    if (el.offsetTop === foldTop) foldBottom = Math.max(foldBottom, el.offsetTop + el.offsetHeight);
+  }
+  list.style.maxHeight = foldBottom - tops[0] + 1 + "px";
 }
 
 function renderRightRail(nav: NavPayload): string {
-  const hot = [...nav.sites].sort((a, b) => b.views - a.views).slice(0, 5);
-  const totalSiteViews = nav.sites.reduce((sum, site) => sum + site.views, 0);
+  const hot = [...nav.sites].sort((a, b) => b.jumps - a.jumps).slice(0, 5);
+  const totalSiteJumps = nav.sites.reduce((sum, site) => sum + site.jumps, 0);
   return (
     '<aside class="right-rail" aria-label="站点动态">' +
     '<section class="rail-section"><h2 class="rail-title">最近评论</h2>' +
@@ -555,13 +748,13 @@ function renderRightRail(nav: NavPayload): string {
           '<a class="rail-hot-row" href="/site/' + encodeURIComponent(site.slug) + '" data-link>' +
           '<span class="rail-rank">' + String(index + 1).padStart(2, "0") + "</span>" +
           '<span class="rail-site">' + esc(site.name) + "</span>" +
-          '<span class="rail-views">' + eyeIcon() + compact(site.views) + "</span></a>",
+          '<span class="rail-views" title="跳转次数">' + jumpIcon() + compact(site.jumps) + "</span></a>",
       )
       .join("") +
     "</div></section>" +
     '<section class="rail-section"><h2 class="rail-title">站点概览</h2><div class="rail-stats">' +
     "<span><b>" + num(nav.stats.totalSites) + "</b>站点</span>" +
-    "<span><b>" + num(totalSiteViews) + "</b>站点浏览</span>" +
+    "<span><b>" + num(totalSiteJumps) + "</b>站点跳转</span>" +
     "<span><b>" + num(nav.stats.totalComments) + "</b>评论</span>" +
     "</div></section>" +
     '<button type="button" class="rail-random" data-action="random-site">随机逛一个</button>' +
@@ -607,8 +800,8 @@ function renderHome(): void {
   const search = (params.get("q") ?? "").trim();
   const activeTag = params.get("tag") ?? "";
   const requestedSort = params.get("sort");
-  const sort: SortMode =
-    requestedSort === "name" || requestedSort === "views" ? requestedSort : "manual";
+  const sort: SortMode = parseSort(requestedSort);
+  const dir: SortDir = parseSortDir(params.get("dir"), sort);
   const flat = flattenCategories(nav.categories);
   const scope = selected ? descendantIds(flat, selected.id) : null;
   const needle = search.toLowerCase();
@@ -624,32 +817,57 @@ function renderHome(): void {
   });
 
   filtered.sort((a, b) => {
-    if (sort === "name") return a.name.localeCompare(b.name, "zh-CN");
-    if (sort === "views") return b.views - a.views || a.sortOrder - b.sortOrder;
-    return a.sortOrder - b.sortOrder || a.id - b.id;
+    let diff: number;
+    if (sort === "name") diff = a.name.localeCompare(b.name, "zh-CN");
+    else if (sort === "jumps") diff = a.jumps - b.jumps;
+    else diff = a.id - b.id;
+    // 主键相同用 id 兜底，保证升/降序切换时顺序稳定不跳动
+    if (diff === 0) diff = a.id - b.id;
+    return dir === "asc" ? diff : -diff;
   });
 
-  const views = filtered.reduce((sum, site) => sum + site.views, 0);
+  const jumps = filtered.reduce((sum, site) => sum + site.jumps, 0);
   const shown = filtered.slice(0, state.more);
   const hasFilters = Boolean(activeSlug || search || activeTag);
   const metaDescription = selected
     ? selected.description || nav.settings.siteDescription
     : nav.settings.siteDescription;
 
-  const sortButton = (value: SortMode, label: string) =>
-    '<button type="button" data-action="sort" data-value="' + value + '"' +
-    (sort === value ? ' class="active"' : "") +
-    ">" + label + "</button>";
+  // 每个按钮都带方向箭头：当前按钮显示实际方向（再点一次反转），其余显示各自默认方向
+  const sortButton = (value: SortMode, label: string) => {
+    const active = sort === value;
+    const shown: SortDir = active ? dir : defaultSortDir(value);
+    const title = active
+      ? dir === "asc"
+        ? "当前升序，点击改为降序"
+        : "当前降序，点击改为升序"
+      : "按" + label + (defaultSortDir(value) === "asc" ? "升序" : "降序") + "排序";
+    return (
+      '<button type="button" class="sort-btn' + (active ? " active" : "") + '"' +
+      ' data-action="sort" data-value="' + value + '"' +
+      ' aria-pressed="' + (active ? "true" : "false") + '" title="' + title + '">' +
+      label + '<span class="sort-dir' + (shown === "asc" ? " is-asc" : "") + '" aria-hidden="true"></span></button>'
+    );
+  };
 
+  // 标签栏全量渲染（服务端已按次数降序排好），每个标签后带半角括号的使用次数；
+  // 超过 3 行由 setupTagsBar() 折叠，并显示「展开全部」
   const tagLinks = nav.tags
-    .slice(0, 20)
     .map((tag) => {
-      const active = tag === activeTag;
+      const active = tag.name === activeTag;
       return '<a class="tag' + (active ? " active" : "") + '" href="' +
-        esc(homeHref({ tag: active ? null : tag })) +
-        '" data-link>' + esc(tag) + "</a>";
+        esc(homeHref({ tag: active ? null : tag.name })) +
+        '" data-link>' + esc(tag.name) + '<span class="tag-count">(' + num(tag.count) + ")</span></a>";
     })
     .join("");
+
+  const tagsBar = tagLinks
+    ? '<div class="tags-bar"><span class="tags-bar__label">标签</span>' +
+      '<div class="tags-bar__body">' +
+      '<div class="tags-bar__list" data-tags-list>' + tagLinks + "</div>" +
+      '<button type="button" class="tags-bar__toggle" data-action="toggle-tags" aria-expanded="false" hidden>展开全部</button>' +
+      "</div></div>"
+    : "";
 
   const cards = shown.map((site) => renderCard(site, !selected)).join("");
 
@@ -659,12 +877,12 @@ function renderHome(): void {
     '<section class="content">' +
     '<div class="toolbar">' +
     '<div class="sort-box"><span class="sort-label">排序</span><div class="sort-options">' +
-    sortButton("manual", "时间") + sortButton("name", "名称") + sortButton("views", "浏览") +
+    sortButton("manual", "时间") + sortButton("name", "名称") + sortButton("jumps", "跳转") +
     "</div></div>" +
     '<form class="search" data-search><input type="search" name="q" value="' + esc(search) + '" placeholder="搜索站点、描述或标签" aria-label="搜索站点"><button type="submit">搜索</button></form>' +
     "</div>" +
-    (tagLinks ? '<div class="tags-bar"><span>标签</span>' + tagLinks + "</div>" : "") +
-    '<div class="result-meta"><span>共 <b>' + num(filtered.length) + "</b> 个站点 · " + num(views) + " 次浏览" + (hasFilters ? " · 已筛选" : "") + "</span>" +
+    tagsBar +
+    '<div class="result-meta"><span>共 <b>' + num(filtered.length) + "</b> 个站点 · " + num(jumps) + " 次跳转" + (hasFilters ? " · 已筛选" : "") + "</span>" +
     (hasFilters ? '<a class="link-btn" href="/" data-link>清除筛选</a>' : "") +
     "</div>" +
     (filtered.length === 0
@@ -679,6 +897,9 @@ function renderHome(): void {
 
   shell(main, selected ? selected.name + " - " + nav.settings.siteName : nav.settings.siteName, metaDescription);
   prepareCardEnhancements();
+  setupTagsBar();
+  // 字体加载后行高可能微调，下一帧复测一次
+  requestAnimationFrame(() => setupTagsBar());
   void loadRecentComments();
 }
 
@@ -686,13 +907,18 @@ function renderHome(): void {
 
 function renderCommentItem(comment: PublicComment): string {
   const author = comment.website
-    ? '<a class="comment-author" href="' + esc(comment.website) + '" target="_blank" rel="noopener noreferrer">' + esc(comment.author) + "</a>"
+    ? '<a class="comment-author" href="' + esc(comment.website) + '" target="_blank" rel="noopener noreferrer nofollow ugc">' + esc(comment.author) + "</a>"
     : '<b class="comment-author">' + esc(comment.author) + "</b>";
+  // IP 属地只到省份，跟中文互联网的通行做法一致
+  const region = comment.ipProvince
+    ? '<span class="comment-ip">IP属地：' + esc(comment.ipProvince) + "</span>"
+    : "";
   return (
     '<article class="comment" id="comment-' + comment.id + '">' +
     '<span class="comment-avatar">' + esc(initialOf(comment.author)) + "</span>" +
     '<div class="comment-body"><header>' + author +
-    '<a class="comment-time" href="#comment-' + comment.id + '"><time>' + timeAgo(comment.createdAt) + "</time></a></header>" +
+    '<a class="comment-time" href="#comment-' + comment.id + '"><time>' + timeAgo(comment.createdAt) + "</time></a>" + region +
+    "</header>" +
     "<p>" + esc(comment.content) + "</p></div></article>"
   );
 }
@@ -722,7 +948,7 @@ function renderCommentsBox(cs: CommentState): void {
       '<button type="submit" class="btn primary small"' + (cs.busy || !cs.captcha ? " disabled" : "") + ">" + (cs.busy ? "提交中…" : "发表评论") + "</button></div>" +
       (cs.notice ? '<p class="form-msg ok">' + esc(cs.notice) + "</p>" : "") +
       (cs.error ? '<p class="form-msg">' + esc(cs.error) + "</p>" : "") +
-      '<p class="comment-note">' + (moderation ? "审核后展示 · " : "") + "邮箱不会公开；填写个人网址后，点击用户名可访问。</p>" +
+      '<p class="comment-note">' + (moderation ? "审核后展示 · " : "") + "邮箱不会公开；评论会展示 IP 属地省份。</p>" +
       "</form>"
     : '<p class="comment-note">评论功能暂时关闭。</p>';
   const list = cs.comments.length
@@ -923,8 +1149,8 @@ function renderSitePage(slug: string, seq: number): Promise<void> {
             (shot.fallback ? ' data-fallback-src="' + esc(shot.fallback) + '"' : "") +
             ' alt="' + esc(site.name) + ' 网站截图" loading="eager" referrerpolicy="no-referrer" data-shot>'
           : "") +
-        '<div class="shot-fallback"' + (shot.src ? " hidden" : "") + ">截图暂不可用，可在后台手动填写截图地址</div>" +
-        "<figcaption>" + (shot.automatic ? "网站截图由免费截图 API 自动生成，首次可能较慢；可在后台设置截图地址覆盖。" : "后台自定义网站截图。") + "</figcaption></figure>";
+        '<div class="shot-fallback"' + (shot.src ? " hidden" : "") + ">截图暂不可用</div>" +
+        "<figcaption>" + (shot.automatic ? "网站截图由免费截图 API 自动生成，首次可能较慢。" : "") + "</figcaption></figure>";
       const main =
         '<div class="wrap"><div class="detail-wrap">' +
         '<div class="breadcrumb"><a href="/" data-link>全部</a> / ' + trail + "</div>" +
@@ -933,14 +1159,22 @@ function renderSitePage(slug: string, seq: number): Promise<void> {
         (faviconFor(site) ? '<img src="' + esc(faviconFor(site)) + '" alt="" referrerpolicy="no-referrer" data-icon>' : "") +
         "</span>" +
         '<div class="detail-head"><div class="detail-title-row"><h1 class="detail-title">' + esc(site.name) + "</h1>" +
-        '<span class="detail-view-badge" title="网站跳转次数">' + eyeIcon() + "<b>" + num(site.views) + "</b> 次跳转</span>" +
-        '<span class="detail-view-badge detail-date-badge" title="收录日期">收录于 ' + formatDate(site.createdAt) + "</span></div>" +
+        '<div class="detail-badges">' +
+        detailBadge(jumpIcon(), "网站跳转次数", "<b>" + num(site.jumps) + "</b> 次跳转", "跳转 <b>" + num(site.jumps) + "</b>") +
+        detailBadge(eyeIcon(), "该详情页被浏览的次数", "该页被浏览 <b>" + num(site.views) + "</b> 次", "浏览 <b>" + num(site.views) + "</b>") +
+        detailBadge("", "收录日期", "收录于 " + formatDate(site.createdAt), "收录 " + formatDate(site.createdAt)) +
+        "</div></div>" +
         '<a class="detail-domain" href="' + esc(site.url) + '" target="_blank" rel="noopener noreferrer" data-site-jump="' + site.id + '">' + esc(site.domain) + "</a>" +
-        '<p class="detail-desc">' + esc(site.description) + "</p>" +
-        '<div class="detail-tags">' + site.tags.map((tag) => '<a class="tag" href="' + esc(tagHref(tag)) + '" data-link>' + esc(tag) + "</a>").join("") +
-        (site.aiGenerated ? '<span class="tag" title="简介由 AI 生成">AI 生成</span>' : "") + "</div></div>" +
+        "</div>" +
         '<div class="detail-actions"><a class="btn primary" href="' + esc(site.url) + '" target="_blank" rel="noopener noreferrer" data-site-jump="' + site.id + '">访问网站</a>' +
-        '<button type="button" class="btn" data-action="copy-link">复制链接</button></div></div>' +
+        '<button type="button" class="btn" data-action="copy-link">复制链接</button></div>' +
+        '<p class="detail-desc">' + esc(site.description) +
+        (site.aiGenerated ? '<span class="tag detail-ai" title="简介由 AI 生成">AI 生成</span>' : "") + "</p>" +
+        (site.tags.length
+          ? '<div class="detail-tags">' +
+            site.tags.map((tag) => '<a class="tag" href="' + esc(tagHref(tag)) + '" data-link>' + esc(tag) + "</a>").join("") + "</div>"
+          : "") +
+        "</div>" +
         shotBlock +
         '<section class="article"><h2>关于 ' + esc(site.name) + '</h2><div class="markdown">' + article + "</div></section>" +
         (related.length
@@ -951,7 +1185,7 @@ function renderSitePage(slug: string, seq: number): Promise<void> {
         '<section class="comments" id="comments-box"><p class="comments-empty">评论加载中…</p></section>' +
         "</div></div>";
       shell(main, site.name + " - " + (state.nav?.settings.siteName ?? "锦囊书签"), site.description);
-      trackView("/site/" + site.slug);
+      trackView("site", site.id);
       void initComments({ type: "site", slug: site.slug });
     } catch {
       if (seq !== state.routeSeq) return;
@@ -962,22 +1196,33 @@ function renderSitePage(slug: string, seq: number): Promise<void> {
 
 
 
-function renderAbout(): void {
+async function renderAbout(): Promise<void> {
   const nav = state.nav;
   if (!nav) return;
   const s = nav.settings;
+  // 关于页的正文存在 pages 里（slug=about），在后台「页面」里编辑
+  let page: PublicPage;
+  try {
+    page = await api<PublicPage>("/api/pages/about");
+  } catch {
+    renderNotFound("没有找到关于页", "它可能已被删除，或尚未发布。");
+    return;
+  }
   const main =
     '<div class="wrap"><div class="page-wrap">' +
     '<h1 class="page-title">' + esc(s.siteName) + "</h1>" +
     '<p class="page-desc">' + esc(s.siteTagline) + "</p>" +
     '<div class="about-stats">' +
     '<div class="about-stat"><b>' + num(nav.stats.totalSites) + '</b><span>收录站点</span></div>' +
-    '<div class="about-stat"><b>' + num(nav.stats.totalViews) + '</b><span>全站浏览</span></div>' +
     '<div class="about-stat"><b>' + num(nav.stats.totalComments) + '</b><span>公开评论</span></div>' +
-    '<div class="about-stat"><b>' + num(nav.stats.todayViews) + '</b><span>今日浏览</span></div></div>' +
-    '<div class="markdown">' + renderMarkdown(s.aboutContent) + "</div>" +
+    '<div class="about-stat"><b>' + num(nav.stats.totalViews) + '</b><span>全站浏览</span></div>' +
+    '<div class="about-stat"><b>' + num(nav.stats.totalJumps) + '</b><span>全站跳转</span></div>' +
+    '<div class="about-stat"><b>' + num(nav.stats.todayViews) + '</b><span>今日浏览</span></div>' +
+    '<div class="about-stat"><b>' + num(nav.stats.todayJumps) + '</b><span>今日跳转</span></div></div>' +
+    '<div class="markdown">' + renderMarkdown(page.content) + "</div>" +
     "</div></div>";
   shell(main, "关于 - " + s.siteName, s.siteDescription);
+  trackView("page", page.id);
 }
 
 async function renderStandalonePage(slug: string, seq: number): Promise<void> {
@@ -995,7 +1240,7 @@ async function renderStandalonePage(slug: string, seq: number): Promise<void> {
       '<section class="comments" id="comments-box"><p class="comments-empty">评论加载中…</p></section>' +
       "</div></div>";
     shell(main, page.title + " - " + (state.nav?.settings.siteName ?? "锦囊书签"), page.excerpt);
-    trackView("/page/" + page.slug);
+    trackView("page", page.id);
     void initComments({ type: "page", slug: page.slug });
   } catch {
     if (seq !== state.routeSeq) return;
@@ -1045,11 +1290,11 @@ document.addEventListener("click", (event) => {
     return;
   }
   if (action === "open-cats") {
-    document.body.classList.add("cats-open");
+    setDrawer(true);
     return;
   }
   if (action === "close-cats") {
-    document.body.classList.remove("cats-open");
+    setDrawer(false);
     return;
   }
   if (action === "reload-nav") {
@@ -1066,14 +1311,30 @@ document.addEventListener("click", (event) => {
   }
   if (action === "sort" && location.pathname === "/") {
     const value = control.dataset.value;
-    if (value === "manual" || value === "name" || value === "views") {
-      navigate(homeHref({ sort: value === "manual" ? null : value }));
+    if (value === "manual" || value === "name" || value === "jumps") {
+      const params = new URLSearchParams(location.search);
+      const current = parseSort(params.get("sort"));
+      const currentDir = parseSortDir(params.get("dir"), current);
+      // 点当前按钮反转方向，点其他按钮回到该维度默认方向
+      const nextDir: SortDir =
+        current === value ? (currentDir === "asc" ? "desc" : "asc") : defaultSortDir(value);
+      navigate(
+        homeHref({
+          sort: value === "manual" ? null : value,
+          dir: nextDir === defaultSortDir(value) ? null : nextDir,
+        }),
+      );
     }
     return;
   }
   if (action === "more") {
     state.more += 120;
     renderHome();
+    return;
+  }
+  if (action === "toggle-tags") {
+    tagsExpanded = !tagsExpanded;
+    setupTagsBar();
     return;
   }
   if (action === "random-site") {
@@ -1167,14 +1428,14 @@ document.addEventListener("auxclick", (event) => {
 
 window.addEventListener("popstate", () => {
   state.more = 120;
-  document.body.classList.remove("cats-open");
+  setDrawer(false);
   window.scrollTo(0, 0);
   void renderRoute();
 });
 
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
-    document.body.classList.remove("cats-open");
+    setDrawer(false);
     return;
   }
   if (event.key === "/" && !isTypingTarget(event.target)) {

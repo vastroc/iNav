@@ -13,6 +13,8 @@ import type {
   SiteDetail,
   SiteSettings,
 } from "../shared/types";
+import { AI_PROVIDERS, DEFAULT_AI_PROMPT } from "../shared/ai";
+import { provinceOf } from "./commentmeta";
 import type { Env } from "./env";
 
 export const DEFAULT_SETTINGS: SiteSettings = {
@@ -20,22 +22,17 @@ export const DEFAULT_SETTINGS: SiteSettings = {
   siteTagline: "把常用网站，收进一页纸里。",
   siteDescription: "一份克制、清晰、持续生长的网址收藏。",
   footerText: "锦囊书签 · 保持好奇，常回来看看。",
-  aboutContent: "",
   seoKeywords: "导航站,网址导航,网址收藏,极简导航",
   githubAdmins: "",
   aiProvider: "pollinations",
   aiModel: "openai",
   aiBaseUrl: "",
+  aiApiKey: "",
+  aiPrompt: DEFAULT_AI_PROMPT,
   commentsEnabled: true,
   commentModeration: true,
   bannedWords: "博彩,赌场,代开发票,办证,加微信,裸聊,色情,成人视频,刷单,返利,USDT",
 };
-
-const AI_PROVIDERS: AiProvider[] = ["pollinations", "openai", "deepseek", "gemini"];
-
-export function str(value: unknown, fallback = ""): string {
-  return typeof value === "string" ? value : fallback;
-}
 
 export function bool(value: unknown): boolean {
   return value === true || value === 1 || value === "1" || value === "true";
@@ -51,8 +48,45 @@ export function clampInt(value: unknown, min: number, max: number, fallback: num
   return Math.min(max, Math.max(min, parsed));
 }
 
-export function nowIso(): string {
-  return new Date().toISOString();
+/**
+ * 当前北京时间，格式 `YYYY-MM-DD HH:MM:SS`。
+ * 本项目数据库内统一存储北京时间（不是 UTC），所有写入时间戳都必须用它。
+ */
+export function nowBeijing(): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date());
+  const map: Record<string, string> = {};
+  for (const part of parts) {
+    if (part.type !== "literal") map[part.type] = part.value;
+  }
+  return map.year + "-" + map.month + "-" + map.day + " " + map.hour + ":" + map.minute + ":" + map.second;
+}
+
+/**
+ * 今日的日期键（北京时间 YYYY-MM-DD），用作 daily_stats.day 的主键。
+ * 每天一行，跨天不需要重置任何计数。
+ */
+export function todayKey(): string {
+  return nowBeijing().slice(0, 10);
+}
+
+/** 给「今天」那一行加一次计数：views = 页面被打开，jumps = 外链被点开。跨天自然写到新的一行。 */
+export async function bumpDailyStat(db: D1Database, field: "views" | "jumps"): Promise<void> {
+  const sql =
+    field === "views"
+      ? `INSERT INTO daily_stats (day, views, jumps) VALUES (?, 1, 0)
+         ON CONFLICT(day) DO UPDATE SET views = daily_stats.views + 1`
+      : `INSERT INTO daily_stats (day, views, jumps) VALUES (?, 0, 1)
+         ON CONFLICT(day) DO UPDATE SET jumps = daily_stats.jumps + 1`;
+  await db.prepare(sql).bind(todayKey()).run();
 }
 
 export function parseTags(value: unknown): string[] {
@@ -122,16 +156,13 @@ export interface SiteRow {
   icon_url: string;
   screenshot_url: string;
   tags: string;
-  detail_enabled: number;
   detail_content?: string;
-  sort_order: number;
   views: number;
-  is_visible: number;
+  jumps: number;
   ai_generated: number;
+  ai_pending?: number | null;
+  ai_error?: string | null;
   link_status: string;
-  link_status_code: number | null;
-  link_checked_at: string | null;
-  link_latency_ms: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -150,14 +181,12 @@ export function mapSite(row: SiteRow): Site {
     iconUrl: row.icon_url,
     screenshotUrl: row.screenshot_url ?? "",
     tags: parseStoredTags(row.tags),
-    detailEnabled: !!row.detail_enabled,
-    sortOrder: row.sort_order,
-    views: row.views,
+    views: row.views ?? 0,
+    jumps: row.jumps,
     aiGenerated: !!row.ai_generated,
+    aiPending: !!row.ai_pending,
+    aiError: row.ai_error ?? "",
     linkStatus: asLinkStatus(row.link_status),
-    linkStatusCode: row.link_status_code,
-    linkCheckedAt: row.link_checked_at,
-    linkLatencyMs: row.link_latency_ms,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -201,7 +230,7 @@ export function mapAdminPage(row: PageRow): AdminPage {
 }
 
 export function mapAdminSite(row: SiteRow): AdminSite {
-  return { ...mapSite(row), isVisible: !!row.is_visible, detailContent: row.detail_content ?? "" };
+  return { ...mapSite(row), detailContent: row.detail_content ?? "" };
 }
 
 export function mapSiteDetail(row: SiteRow, categoryPath: SiteDetail["categoryPath"]): SiteDetail {
@@ -227,12 +256,13 @@ export async function loadSettings(db: D1Database): Promise<SiteSettings> {
     siteTagline: pick("site_tagline", DEFAULT_SETTINGS.siteTagline),
     siteDescription: pick("site_description", DEFAULT_SETTINGS.siteDescription),
     footerText: pick("footer_text", DEFAULT_SETTINGS.footerText),
-    aboutContent: pick("about_content", DEFAULT_SETTINGS.aboutContent),
     seoKeywords: pick("seo_keywords", DEFAULT_SETTINGS.seoKeywords),
     githubAdmins: pick("github_admins", DEFAULT_SETTINGS.githubAdmins),
     aiProvider: AI_PROVIDERS.includes(rawProvider) ? rawProvider : "pollinations",
     aiModel: pick("ai_model", DEFAULT_SETTINGS.aiModel),
     aiBaseUrl: pick("ai_base_url", DEFAULT_SETTINGS.aiBaseUrl),
+    aiApiKey: pick("ai_api_key", DEFAULT_SETTINGS.aiApiKey),
+    aiPrompt: pick("ai_prompt", DEFAULT_SETTINGS.aiPrompt) || DEFAULT_AI_PROMPT,
     commentsEnabled: pick("comments_enabled", "1") === "1",
     commentModeration: pick("comment_moderation", "1") === "1",
     bannedWords: pick("banned_words", DEFAULT_SETTINGS.bannedWords),
@@ -245,7 +275,6 @@ export function publicSettings(settings: SiteSettings): SiteConfigPublic {
     siteTagline: settings.siteTagline,
     siteDescription: settings.siteDescription,
     footerText: settings.footerText,
-    aboutContent: settings.aboutContent,
     seoKeywords: settings.seoKeywords,
     aiProvider: settings.aiProvider,
     aiModel: settings.aiModel,
@@ -302,7 +331,9 @@ export function mapPublicComment(row: {
   website?: string;
   content: string;
   created_at: string;
+  ip_location?: string;
 }): PublicComment {
+  const location = row.ip_location ?? "";
   return {
     id: row.id,
     siteId: row.site_id,
@@ -311,6 +342,8 @@ export function mapPublicComment(row: {
     website: row.website ?? "",
     content: row.content,
     createdAt: row.created_at,
+    ipLocation: location,
+    ipProvince: provinceOf(location),
   };
 }
 
@@ -327,8 +360,15 @@ export function mapAdminComment(row: {
   content: string;
   status: string;
   ip_hash: string;
+  ip?: string;
+  user_agent?: string;
+  device?: string;
+  browser?: string;
+  os?: string;
+  ip_location?: string;
   created_at: string;
 }): AdminComment {
+  const location = row.ip_location ?? "";
   return {
     id: row.id,
     siteId: row.site_id,
@@ -342,6 +382,13 @@ export function mapAdminComment(row: {
     content: row.content,
     status: row.status === "approved" || row.status === "spam" ? row.status : "pending",
     ipHash: row.ip_hash,
+    ip: row.ip ?? "",
+    userAgent: row.user_agent ?? "",
+    device: row.device ?? "",
+    browser: row.browser ?? "",
+    os: row.os ?? "",
+    ipLocation: location,
+    ipProvince: provinceOf(location),
     createdAt: row.created_at,
   };
 }
@@ -555,8 +602,4 @@ export function escapeXml(value: string): string {
 
 export function parsePage(value: unknown, fallback = 1): number {
   return clampInt(value, 1, 100000, fallback);
-}
-
-export function clientError(message: string, status = 400): Response {
-  return Response.json({ error: message }, { status });
 }

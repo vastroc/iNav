@@ -1,26 +1,37 @@
+import groups from "./lucide-groups.json";
+
 export interface CategoryIconGroup {
   label: string;
   icons: string[];
 }
 
-export const CATEGORY_ICON_GROUPS: CategoryIconGroup[] = [
-  { label: "开发", icons: ["code", "terminal", "git-branch", "git-pull-request", "database", "server", "cloud", "cpu", "bug", "braces", "webhook", "package", "container", "workflow", "network", "shield", "lock", "key"] },
-  { label: "设计", icons: ["palette", "pen-tool", "type", "image", "layout", "shapes", "frame", "brush", "swatch-book", "component", "ruler", "pipette", "paintbrush", "wand-sparkles", "move", "crop", "grid-2x2"] },
-  { label: "内容", icons: ["book-open", "book", "book-marked", "library", "newspaper", "file-text", "file", "files", "file-code", "file-image", "notebook-pen", "sticky-note", "rss", "quote", "film", "megaphone", "mic", "video", "tv", "radio"] },
-  { label: "效率", icons: ["briefcase", "calendar", "calendar-days", "check-square", "clipboard", "folder", "archive", "mail", "search", "inbox", "send", "download", "upload", "cloud-upload", "list-checks", "kanban", "timer", "alarm-clock", "target", "flag"] },
-  { label: "生活", icons: ["coffee", "play", "music", "headphones", "speaker", "camera", "gamepad-2", "heart", "shopping-bag", "shopping-cart", "gift", "ticket", "utensils", "pizza", "apple", "dumbbell", "bike", "car", "plane", "train", "tent", "palmtree", "umbrella", "sun", "moon", "home"] },
-  { label: "通用", icons: ["star", "bookmark", "globe", "link", "external-link", "layers", "grid-3x3", "compass", "sparkles", "zap", "settings", "tag", "hash", "at-sign", "bell", "eye", "filter", "sliders-horizontal", "refresh-cw", "repeat", "shuffle", "plus", "check", "x", "info", "circle-help", "smartphone", "monitor", "mouse-pointer"] },
-];
+/** 精选图标分组：由 src/lib/lucide-groups.json 维护，顺序即弹窗里的展示顺序 */
+export const CATEGORY_ICON_GROUPS: CategoryIconGroup[] = groups as CategoryIconGroup[];
 
-export const CATEGORY_ICONS: Record<string, string> = Object.fromEntries(
-  CATEGORY_ICON_GROUPS.flatMap((group) => group.icons.map((icon) => [icon, icon])),
-);
+const CURATED = new Set(CATEGORY_ICON_GROUPS.flatMap((group) => group.icons));
+
+/** 精选图标：合成一个 sprite，每页都用，一次请求约 85 KB */
+export const CURATED_SPRITE = "/category-icons.svg";
+/** 精选之外的图标：一个图标一个文件（约 350 B），用到哪个才请求哪个 */
+export const SINGLE_ICON_DIR = "/icons";
+
+/** 图标名只接受小写字母、数字、短横线，避免拼出奇怪的 URL / 注入 */
+export function isIconName(value: string): boolean {
+  return /^[a-z0-9][a-z0-9-]*$/.test(value);
+}
+
+/** 精选走合集 sprite，其余走单图标文件——不再整包下载全量 sprite */
+export function iconHref(name: string): string {
+  return CURATED.has(name)
+    ? CURATED_SPRITE + "#icon-" + name
+    : SINGLE_ICON_DIR + "/" + name + ".svg#icon-" + name;
+}
 
 export function categoryIcon(name: string, size = 15): string {
-  const safeName = name in CATEGORY_ICONS ? name : "folder";
+  const key = isIconName(name) ? name : "folder";
   return (
     '<svg class="cat-icon" viewBox="0 0 24 24" width="' + size + '" height="' + size + '" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
-    '<use href="/category-icons.svg#icon-' + safeName + '"></use>' +
+    '<use href="' + iconHref(key) + '"></use>' +
     "</svg>"
   );
 }

@@ -19,3 +19,7 @@
 
 /assets/*
   Cache-Control: public, max-age=31536000, immutable
+
+# 单图标文件按名称寻址、路径稳定，给较长缓存
+/icons/*
+  Cache-Control: public, max-age=2592000

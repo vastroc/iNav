@@ -18,10 +18,8 @@
   --accent: #1b5fbe;
   --accent-soft: #eaf1fb;
   --green: #247a4b;
-  --amber: #95640f;
   --red: #b23a2b;
   --tag: #e8e8e8;
-  --shadow: none;
   color-scheme: light;
 }
 
@@ -38,7 +36,6 @@
   --accent: #7ca8ed;
   --accent-soft: #1d2b3d;
   --green: #69bc8b;
-  --amber: #d4a252;
   --red: #e07b6c;
   --tag: #272725;
   color-scheme: dark;
@@ -46,6 +43,8 @@
 
 html {
   -webkit-text-size-adjust: 100%;
+  /* 顶栏常驻后，锚点跳转的落点要避开它 */
+  scroll-padding-top: 68px;
 }
 
 [hidden] {
@@ -130,6 +129,9 @@ ol {
 
 /* top bar */
 .top {
+  position: sticky;
+  top: 0;
+  z-index: 20;
   border-bottom: 1px solid var(--line);
   background: var(--panel);
 }
@@ -242,29 +244,97 @@ ol {
 
 .sidebar {
   position: sticky;
-  top: 16px;
-  max-height: calc(100vh - 32px);
+  /* 顶栏常驻，侧栏要落在它下面，不能被盖住 */
+  top: 69px;
+  max-height: calc(100vh - 85px);
   overflow-y: auto;
   border: 1px solid var(--line);
   background: var(--panel);
 }
 
-.sidebar-head {
+/* 移动端抽屉：桌面端不渲染显示，≤900px 由 .drawer 接管分类与导航 */
+.drawer {
   display: none;
-  align-items: center;
-  justify-content: space-between;
-  padding: 9px 11px;
-  border-bottom: 1px solid var(--line);
-  color: var(--muted);
-  font-size: 13px;
 }
 
-.sidebar-close {
-  display: none;
+.drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 11px 10px 11px 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.drawer-title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.drawer-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  padding: 0;
   border: 0;
+  border-radius: 3px;
   background: transparent;
   color: var(--muted);
-  font-size: 13px;
+}
+
+.drawer-close:hover {
+  background: var(--panel-soft);
+  color: var(--text);
+}
+
+/* 导航区：胶囊按钮自动换行，页面再多也不会撑破抽屉 */
+.drawer-label {
+  padding: 12px 6px 7px;
+  color: var(--faint);
+  font-size: 11.5px;
+  letter-spacing: 0.04em;
+}
+
+.drawer-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  padding: 0 6px;
+}
+
+.drawer-link {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  padding: 6px 13px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--text-soft);
+  font-size: 13.5px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.drawer-link:hover {
+  border-color: var(--line-strong);
+  background: var(--panel-soft);
+  text-decoration: none;
+}
+
+.drawer-link.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
 }
 
 .cat-list {
@@ -390,11 +460,11 @@ ol {
 
 .right-rail {
   position: sticky;
-  top: 16px;
+  top: 69px;
   display: flex;
   flex-direction: column;
   gap: 10px;
-  max-height: calc(100vh - 32px);
+  max-height: calc(100vh - 85px);
   overflow-y: auto;
 }
 
@@ -521,7 +591,8 @@ ol {
   font-size: 10.5px;
 }
 
-.rail-views .eye-icon {
+.rail-views .eye-icon,
+.rail-views .jump-icon {
   width: 11px;
   height: 11px;
 }
@@ -654,6 +725,7 @@ ol {
   background: var(--panel);
 }
 
+/* “排序”是功能标签，不是可点按钮：只留灰字 + 一条细分隔线，不抢按钮的视觉 */
 .sort-label {
   padding: 0 9px 0 6px;
   border-right: 1px solid var(--line);
@@ -669,6 +741,9 @@ ol {
 }
 
 .sort-box button {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   height: 28px;
   padding: 0 8px;
   border: 1px solid transparent;
@@ -676,6 +751,29 @@ ol {
   background: transparent;
   color: var(--muted);
   font-size: 12.5px;
+}
+
+/* 方向箭头：▼ 降序 / ▲ 升序；非当前按钮淡一点，提示各自的默认方向 */
+.sort-dir {
+  width: 0;
+  height: 0;
+  border-left: 3.5px solid transparent;
+  border-right: 3.5px solid transparent;
+  border-top: 4.5px solid currentColor;
+  opacity: 0.45;
+}
+
+.sort-dir.is-asc {
+  border-top: 0;
+  border-bottom: 4.5px solid currentColor;
+}
+
+.sort-box button:hover .sort-dir {
+  opacity: 0.8;
+}
+
+.sort-box button.active .sort-dir {
+  opacity: 1;
 }
 
 .sort-box button:hover {
@@ -689,47 +787,81 @@ ol {
   font-weight: 600;
 }
 
-.floating-cats {
+/* 移动端分类入口：只在窄屏出现，外观与右侧主题按钮一致 */
+.top-menu {
   display: none;
-  position: fixed;
-  right: 12px;
-  bottom: calc(12px + env(safe-area-inset-bottom, 0px));
-  z-index: 40;
   align-items: center;
-  gap: 4px;
-  height: 34px;
-  padding: 0 11px;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  padding: 0;
   border: 0;
-  border-radius: 17px;
-  background: var(--accent);
-  color: #fff;
-  font-size: 12.5px;
-  font-weight: 600;
-  box-shadow: 0 3px 10px rgba(27, 95, 190, 0.24);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--muted);
 }
 
-.floating-cats .cat-icon {
-  width: 14px;
-  height: 14px;
-}
-
-body.cats-open .floating-cats {
-  display: none;
+.top-menu:hover {
+  background: var(--panel-soft);
+  color: var(--text);
 }
 
 .tags-bar {
   display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 4px;
+  align-items: flex-start;
+  gap: 6px;
   padding: 8px 0;
   border-bottom: 1px solid var(--line);
 }
 
 .tags-bar > span {
+  flex: none;
   margin-right: 2px;
+  padding-top: 3px;
   color: var(--faint);
   font-size: 12px;
+  line-height: 1.5;
+}
+
+.tags-bar__body {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 默认最多 3 行，超出由脚本设置 max-height 折叠 */
+.tags-bar__list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  width: 100%;
+  overflow: hidden;
+  transition: max-height .18s ease;
+}
+
+/* 折叠时由脚本插到第三行最后一个标签之后；外观与 .tag 一致，仅文字为蓝色。
+   margin-right:auto 吃掉本行余量，让后面的标签换行 */
+.tags-bar__toggle {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  margin-right: auto;
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: var(--tag);
+  color: var(--accent);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.tags-bar__toggle:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 .tag {
@@ -751,6 +883,21 @@ a.tag:hover,
   background: var(--accent-soft);
   color: var(--accent);
   text-decoration: none;
+}
+
+/* 标签后的使用次数，半角括号，灰字不抢标签名 */
+.tag-count {
+  margin-left: 2px;
+  color: var(--faint);
+  font-size: 10.5px;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+a.tag:hover .tag-count,
+.tag.active .tag-count {
+  color: inherit;
+  opacity: .8;
 }
 
 .result-meta {
@@ -829,13 +976,6 @@ a.tag:hover,
   pointer-events: none;
 }
 
-.corner-stats {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 1px;
-}
-
 .corner-stat {
   display: inline-flex;
   align-items: center;
@@ -846,6 +986,10 @@ a.tag:hover,
 }
 
 .eye-icon {
+  color: var(--muted);
+}
+
+.jump-icon {
   color: var(--muted);
 }
 
@@ -888,18 +1032,6 @@ a.tag:hover,
   color: #555;
   font-size: 11px;
   font-weight: 600;
-}
-
-.ss-icon img {
-  display: none;
-}
-
-.ss-icon.has-img img {
-  display: block;
-}
-
-.icon-wrap {
-  position: relative;
 }
 
 .card-title-wrap {
@@ -980,7 +1112,8 @@ a.tag:hover,
 }
 
 .card:hover .card-tags.is-overflow .tag-track {
-  animation: tag-marquee 2.5s ease-in-out infinite alternate;
+  /* linear：全程恒速，不再两头慢中间快；时长由 JS 按“距离 / 速度”算 */
+  animation: tag-marquee var(--tag-duration, 2.5s) linear infinite alternate;
 }
 
 @keyframes tag-marquee {
@@ -1128,6 +1261,7 @@ a.card-cat:hover {
 
 .detail-top {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   gap: 12px;
   padding-bottom: 14px;
@@ -1146,8 +1280,13 @@ a.card-cat:hover {
   gap: 9px;
 }
 
+/* 桌面端：徽标容器不参与布局，仍与标题同排 */
+.detail-badges {
+  display: contents;
+}
+
 .detail-title {
-  font-size: 26px;
+  font-size: 22px;
   font-weight: 600;
   line-height: 1.2;
   letter-spacing: -0.03em;
@@ -1173,8 +1312,14 @@ a.card-cat:hover {
   font-weight: 600;
 }
 
-.detail-view-badge .eye-icon {
+.detail-view-badge .eye-icon,
+.detail-view-badge .jump-icon {
   color: var(--accent);
+}
+
+/* 移动端用的精简文案，桌面端不显示 */
+.badge-mini {
+  display: none;
 }
 
 .detail-domain {
@@ -1192,31 +1337,27 @@ a.card-cat:hover {
 }
 
 .detail-desc {
-  margin-top: 8px;
+  /* 简介与标签独占一整行，不再缩在图标右侧，左边不留空白 */
+  flex: 1 0 100%;
+  order: 1;
+  margin-top: 0;
   color: var(--text-soft);
   font-size: 14.5px;
 }
 
+/* 简介末尾紧跟的「AI 生成」标注 */
+.detail-desc .detail-ai {
+  margin-left: 5px;
+  vertical-align: 1.5px;
+}
+
 .detail-tags {
+  flex: 1 0 100%;
+  order: 2;
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
-  margin-top: 8px;
-}
-
-.stats-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 18px;
-  padding: 10px 0;
-  border-bottom: 1px solid var(--line);
-  color: var(--muted);
-  font-size: 12.5px;
-}
-
-.stats-row b {
-  color: var(--text);
-  font-weight: 600;
+  margin-top: 0;
 }
 
 .shot {
@@ -1529,9 +1670,15 @@ a.card-cat:hover {
   font-weight: 600;
 }
 
-a.comment-author:hover {
+/* 填了个人网址：用户名就是可点的外链，蓝色表示可点 */
+a.comment-author {
   color: var(--accent);
   text-decoration: none;
+}
+
+a.comment-author:hover {
+  color: var(--accent);
+  text-decoration: underline;
 }
 
 .comment-time {
@@ -1542,6 +1689,13 @@ a.comment-author:hover {
 .comment-time:hover {
   color: var(--accent);
   text-decoration: none;
+}
+
+/* IP 属地：与时间同一行，弱化处理 */
+.comment-ip {
+  color: var(--faint);
+  font-size: 11.5px;
+  opacity: .85;
 }
 
 .comment-body p {
@@ -1572,7 +1726,7 @@ a.comment-author:hover {
 
 .page-wrap .page-title {
   margin-bottom: 4px;
-  font-size: 28px;
+  font-size: 27px;
 }
 
 .page-meta {
@@ -1593,7 +1747,8 @@ a.comment-author:hover {
 
 .about-stats {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  /* 收录站点 / 公开评论 / 全站浏览 / 全站跳转 / 今日浏览 / 今日跳转 */
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 10px;
   margin: 18px 0 20px;
 }
@@ -1685,24 +1840,44 @@ a.comment-author:hover {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .sidebar {
+  /* 分类与导航改由抽屉承载，左侧常驻栏和顶栏导航行都收起 */
+  .sidebar,
+  .nav {
+    display: none;
+  }
+
+  .drawer {
+    display: flex;
+    flex-direction: column;
     position: fixed;
     top: 0;
     left: 0;
     z-index: 30;
-    width: 260px;
+    width: 272px;
+    max-width: 84vw;
     height: 100vh;
-    max-height: none;
+    height: 100dvh;
+    border-right: 1px solid var(--line);
+    background: var(--panel);
     transform: translateX(-101%);
     transition: transform 0.15s ease;
+    overscroll-behavior: contain;
   }
 
   body.cats-open {
     overflow: hidden;
   }
 
-  body.cats-open .sidebar {
+  body.cats-open .drawer {
     transform: translateX(0);
+  }
+
+  .drawer-body {
+    flex: 1;
+    min-height: 0;
+    padding: 0 8px calc(18px + env(safe-area-inset-bottom, 0px));
+    overflow-y: auto;
+    overscroll-behavior: contain;
   }
 
   .sidebar-scrim {
@@ -1718,21 +1893,17 @@ a.comment-author:hover {
     display: block;
   }
 
-  .sidebar-head {
-    display: flex;
-    justify-content: flex-end;
-  }
-
-  .sidebar-close {
-    display: block;
-  }
-
-  .floating-cats {
+  .top-menu {
     display: inline-flex;
   }
 }
 
 @media (max-width: 700px) {
+  html {
+    /* 顶栏只剩 56px 单行 */
+    scroll-padding-top: 66px;
+  }
+
   .wrap,
   .home-wrap {
     width: calc(100% - 20px);
@@ -1740,35 +1911,28 @@ a.comment-author:hover {
 
   .top-inner {
     display: grid;
+    /* 单行顶栏：菜单 + 品牌 + 主题按钮，导航链接移入抽屉 */
     grid-template-columns: 1fr auto 1fr;
+    grid-template-rows: 56px;
     align-items: center;
-    min-height: 48px;
-    gap: 2px 8px;
-    padding: 5px 0;
+    min-height: 0;
+    gap: 0 8px;
+    padding: 0;
   }
 
   .brand {
     grid-column: 2;
-    grid-row: 1;
     justify-self: center;
   }
 
-  .nav {
-    grid-column: 1 / -1;
-    grid-row: 2;
-    width: 100%;
-    overflow-x: auto;
-    justify-content: center;
-  }
-
-  .nav a {
-    padding: 3px 8px;
-    font-size: 15.5px;
+  /* 菜单按钮贴最左侧，与右侧主题按钮左右对称 */
+  .top-menu {
+    grid-column: 1;
+    justify-self: start;
   }
 
   .top-links {
     grid-column: 3;
-    grid-row: 1;
     justify-self: end;
     gap: 0;
     margin-left: 0;
@@ -1935,6 +2099,11 @@ a.comment-author:hover {
     font-size: 14.5px;
   }
 
+  /* 独立页标题：桌面 28px → 手机 24px（≤420px 再降到 22px），随屏幕收窄 */
+  .page-wrap .page-title {
+    font-size: 24px;
+  }
+
   .detail-desc {
     font-size: 15.5px;
   }
@@ -1951,11 +2120,61 @@ a.comment-author:hover {
     font-size: 12.5px;
   }
 
+  /* 移动端：图标在左、标题与网址在右；徽标/简介/标签/按钮通栏，左边不再留空 */
   .detail-top {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    column-gap: 12px;
+    row-gap: 7px;
+    align-items: start;
+  }
+
+  /* 拍平两层容器，标题、网址、徽标才能各自摆进网格 */
+  .detail-head,
+  .detail-title-row {
+    display: contents;
+  }
+
+  /* 图标跨「标题+网址」两行，行高才由文字决定，不会把网址顶下去 */
+  .site-icon.lg {
+    grid-column: 1;
+    grid-row: 1 / span 2;
+  }
+
+  .detail-title {
+    grid-column: 2;
+    grid-row: 1;
+    font-size: 20px;
+  }
+
+  .detail-domain {
+    grid-column: 2;
+    grid-row: 2;
+    justify-self: start;
+    margin-top: 0;
+  }
+
+  .detail-badges {
+    grid-column: 1 / -1;
+    grid-row: 3;
+    display: flex;
     flex-wrap: wrap;
+    gap: 5px;
+  }
+
+  .detail-desc {
+    grid-column: 1 / -1;
+    grid-row: 4;
+  }
+
+  .detail-tags {
+    grid-column: 1 / -1;
+    grid-row: 5;
   }
 
   .detail-actions {
+    grid-column: 1 / -1;
+    grid-row: 6;
     width: 100%;
   }
 
@@ -1963,8 +2182,17 @@ a.comment-author:hover {
     flex: 1;
   }
 
-  .detail-title {
-    font-size: 23px;
+  /* 换精简文案（跳转 0 / 浏览 0 / 收录 2026/11/13），字号不变也能挤进一行 */
+  .badge-full {
+    display: none;
+  }
+
+  .badge-mini {
+    display: inline;
+  }
+
+  .detail-view-badge {
+    padding: 2px 7px;
   }
 
   .comment-form .row {
@@ -1997,7 +2225,10 @@ a.comment-author:hover {
 }
 
 @media (max-width: 420px) {
-  .page-title {
-    font-size: 22px;
+  /* 必须带上 .page-wrap：基础样式里 `.page-wrap .page-title` 是 28px，
+     单写 .page-title 优先级不够，规则会被盖掉 */
+  .page-title,
+  .page-wrap .page-title {
+    font-size: 25px;
   }
 }

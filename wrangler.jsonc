@@ -22,11 +22,7 @@
 			"migrations_dir": "migrations"
 		}
 	],
-	"triggers": {
-		"crons": [
-			"0 3 * * *"
-		]
-	},
+	// 不做定时任务：链接检测只在新增/修改站点和后台手动点「检测链接」时触发
 	"observability": {
 		"enabled": true
 	}

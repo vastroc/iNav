@@ -3,10 +3,9 @@ import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import adminRoutes from "./admin";
 import authRoutes, { requireAdmin } from "./auth";
-import type { AppEnv, Env } from "./env";
-import { runScheduledChecks } from "./linkcheck";
+import type { AppEnv } from "./env";
 import publicRoutes from "./public";
-import { escapeXml, requestOrigin } from "./utils";
+import { bumpDailyStat, escapeXml, nowBeijing, requestOrigin } from "./utils";
 
 const app = new Hono<AppEnv>();
 
@@ -47,13 +46,14 @@ app.route("/api", publicRoutes);
 app.get("/go/:id", async (context) => {
   const id = Number.parseInt(context.req.param("id") ?? "", 10);
   if (!Number.isFinite(id) || id <= 0) return context.redirect("/", 302);
-  const row = await context.env.DB.prepare("SELECT url FROM sites WHERE id = ? AND is_visible = 1")
+  const row = await context.env.DB.prepare("SELECT url FROM sites WHERE id = ?")
     .bind(id)
     .first<{ url: string }>();
   if (!row) return context.redirect("/", 302);
-  await context.env.DB.prepare("UPDATE sites SET views = views + 1 WHERE id = ? AND is_visible = 1")
+  await context.env.DB.prepare("UPDATE sites SET jumps = jumps + 1 WHERE id = ?")
     .bind(id)
     .run();
+  await bumpDailyStat(context.env.DB, "jumps");
   return context.redirect(row.url, 302);
 });
 
@@ -83,7 +83,7 @@ app.get("/admin/*", serveAdmin);
 app.get("/sitemap.xml", async (context) => {
   const [sites, categories, pages] = await Promise.all([
     context.env.DB.prepare(
-      "SELECT slug, updated_at FROM sites WHERE is_visible = 1 AND detail_enabled = 1 ORDER BY updated_at DESC",
+      "SELECT slug, updated_at FROM sites ORDER BY updated_at DESC",
     ).all<{ slug: string; updated_at: string }>(),
     context.env.DB.prepare("SELECT slug FROM categories ORDER BY sort_order, id").all<{ slug: string }>(),
     context.env.DB.prepare("SELECT slug, updated_at FROM pages WHERE is_published = 1 ORDER BY sort_order, id").all<{
@@ -92,7 +92,7 @@ app.get("/sitemap.xml", async (context) => {
     }>(),
   ]);
   const origin = requestOrigin(context.req.raw, context.env);
-  const today = new Date().toISOString().slice(0, 10);
+  const today = nowBeijing().slice(0, 10);
   const urls: string[] = [
     `<url><loc>${escapeXml(origin)}/</loc><lastmod>${today}</lastmod><changefreq>daily</changefreq></url>`,
     `<url><loc>${escapeXml(origin)}/about</loc><changefreq>monthly</changefreq></url>`,
@@ -125,15 +125,5 @@ app.onError((error, context) => {
   return context.json({ error: "服务器内部错误，请稍后再试" }, 500);
 });
 
-const worker = {
-  fetch: app.fetch,
-  scheduled(_controller: ScheduledController, env: Env, context: ExecutionContext) {
-    context.waitUntil(
-      runScheduledChecks(env).catch((error) => {
-        console.error("Scheduled link check failed", error);
-      }),
-    );
-  },
-} satisfies ExportedHandler<Env>;
-
-export default worker;
+// 没有 Cron / 定时任务：链接检测由新增、修改站点和后台手动触发
+export default app;

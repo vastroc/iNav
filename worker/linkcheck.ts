@@ -1,6 +1,6 @@
 import type { LinkCheckResult, LinkStatus } from "../shared/types";
 import type { Env } from "./env";
-import { normalizeUrl, nowIso } from "./utils";
+import { normalizeUrl, nowBeijing } from "./utils";
 
 interface CheckSiteRow {
   id: number;
@@ -33,7 +33,7 @@ async function request(url: string, method: "HEAD" | "GET"): Promise<Response> {
   });
 }
 
-export async function checkOneSite(env: Env, site: CheckSiteRow, trigger = "manual"): Promise<LinkCheckResult> {
+export async function checkOneSite(env: Env, site: CheckSiteRow): Promise<LinkCheckResult> {
   const startedAt = Date.now();
   const safeUrl = normalizeUrl(site.url);
   let status: LinkStatus = "dead";
@@ -69,7 +69,7 @@ export async function checkOneSite(env: Env, site: CheckSiteRow, trigger = "manu
     }
   }
 
-  const checkedAt = nowIso();
+  const checkedAt = nowBeijing();
   const latency = latencyMs ?? (Date.now() - startedAt);
   try {
     const exists = await env.DB.prepare("SELECT id FROM sites WHERE id = ?").bind(site.id).first<{ id: number }>();
@@ -82,15 +82,13 @@ export async function checkOneSite(env: Env, site: CheckSiteRow, trigger = "manu
       error: "站点已删除",
       checkedAt,
     };
-    await env.DB.batch([
-      env.DB.prepare(
-        "UPDATE sites SET link_status = ?, link_status_code = ?, link_checked_at = ?, link_latency_ms = ?, updated_at = ? WHERE id = ?",
-      ).bind(status, statusCode, checkedAt, latency, checkedAt, site.id),
-      env.DB.prepare(
-        `INSERT INTO link_checks (site_id, status, status_code, latency_ms, error, trigger, checked_at)
-         SELECT ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM sites WHERE id = ?)`,
-      ).bind(site.id, status, statusCode, latency, error, trigger, checkedAt, site.id),
-    ]);
+    // 只回写最新状态：检测历史表已随 0013 迁移删除，没有读取方
+    // link_checked_at 仍保留，/api/admin/check-all 靠它把“最久没检测过”的排前面
+    await env.DB.prepare(
+      "UPDATE sites SET link_status = ?, link_checked_at = ?, updated_at = ? WHERE id = ?",
+    )
+      .bind(status, checkedAt, checkedAt, site.id)
+      .run();
   } catch (dbError) {
     const message = dbError instanceof Error ? dbError.message : String(dbError);
     if (!message.includes("FOREIGN KEY constraint failed")) {
@@ -112,7 +110,6 @@ export async function checkOneSite(env: Env, site: CheckSiteRow, trigger = "manu
 export async function checkSites(
   env: Env,
   sites: CheckSiteRow[],
-  trigger = "manual",
   concurrency = 4,
 ): Promise<LinkCheckResult[]> {
   const results: LinkCheckResult[] = [];
@@ -123,28 +120,9 @@ export async function checkSites(
       cursor += 1;
       const site = sites[index];
       if (!site) return;
-      results[index] = await checkOneSite(env, site, trigger);
+      results[index] = await checkOneSite(env, site);
     }
   });
   await Promise.all(runners);
   return results.filter(Boolean);
-}
-
-export async function staleSites(env: Env, limit = 24): Promise<CheckSiteRow[]> {
-  const { results } = await env.DB.prepare(
-    `SELECT id, name, url FROM sites
-     WHERE is_visible = 1
-       AND (link_checked_at IS NULL OR datetime(link_checked_at) < datetime('now', '-7 days'))
-     ORDER BY CASE WHEN link_checked_at IS NULL THEN 0 ELSE 1 END, datetime(link_checked_at) ASC
-     LIMIT ?`,
-  )
-    .bind(limit)
-    .all<CheckSiteRow>();
-  return results ?? [];
-}
-
-export async function runScheduledChecks(env: Env): Promise<void> {
-  const sites = await staleSites(env, 40);
-  if (!sites.length) return;
-  await checkSites(env, sites, "cron", 4);
 }

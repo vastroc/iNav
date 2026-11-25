@@ -1,9 +1,11 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
-import type { Category, CommentsPayload, NavPage, NavPayload, NavStats, RecentComment } from "../shared/types";
+import type { Category, CommentsPayload, NavPage, NavPayload, NavStats, NavTag, RecentComment } from "../shared/types";
 import type { AppEnv } from "./env";
 import { createCaptcha, verifyCaptcha } from "./captcha";
+import { clientIp, fillCommentLocation, parseUserAgent } from "./commentmeta";
 import {
+  bumpDailyStat,
   categoryPath,
   clampInt,
   loadSettings,
@@ -12,9 +14,11 @@ import {
   mapPublicPage,
   mapSite,
   mapSiteDetail,
+  nowBeijing,
   parsePage,
   publicSettings,
   stableCategoryTree,
+  todayKey,
   visitorHash,
   type PageRow,
   type SiteRow,
@@ -31,12 +35,23 @@ function aggregateCategoryCounts(nodes: Category[]): void {
 }
 
 publicRoutes.get("/health", (context) => {
-  return context.json({ ok: true, time: new Date().toISOString() });
+  return context.json({ ok: true, time: nowBeijing() });
 });
 
 publicRoutes.get("/nav", async (context) => {
   const db = context.env.DB;
-  const [categoryResult, countResult, siteResult, pageResult, settings, siteTotals, viewTotals, commentTotals, linkGroups] =
+  const [
+    categoryResult,
+    countResult,
+    siteResult,
+    pageResult,
+    settings,
+    siteTotals,
+    pageTotals,
+    todayStats,
+    commentTotals,
+    linkGroups,
+  ] =
     await Promise.all([
       db.prepare("SELECT id, name, slug, description, icon, parent_id, sort_order FROM categories ORDER BY sort_order, id").all<{
         id: number;
@@ -48,13 +63,13 @@ publicRoutes.get("/nav", async (context) => {
         sort_order: number;
       }>(),
       db
-        .prepare("SELECT category_id, COUNT(*) AS count FROM sites WHERE is_visible = 1 GROUP BY category_id")
+        .prepare("SELECT category_id, COUNT(*) AS count FROM sites GROUP BY category_id")
         .all<{ category_id: number; count: number }>(),
       db
         .prepare(
           `SELECT s.*, c.name AS category_name, c.slug AS category_slug
            FROM sites s JOIN categories c ON c.id = s.category_id
-           WHERE s.is_visible = 1 ORDER BY s.sort_order, s.id`,
+           ORDER BY s.id`,
         )
         .all<SiteRow>(),
       db
@@ -63,17 +78,17 @@ publicRoutes.get("/nav", async (context) => {
       loadSettings(db),
       db
         .prepare(
-          "SELECT COUNT(*) AS sites, COALESCE(SUM(views), 0) AS views FROM sites WHERE is_visible = 1",
+          "SELECT COUNT(*) AS sites, COALESCE(SUM(jumps), 0) AS jumps, COALESCE(SUM(views), 0) AS views FROM sites",
         )
-        .first<{ sites: number; views: number }>(),
+        .first<{ sites: number; jumps: number; views: number }>(),
+      db.prepare("SELECT COALESCE(SUM(views), 0) AS views FROM pages").first<{ views: number }>(),
       db
-        .prepare(
-          "SELECT COALESCE(SUM(CASE WHEN date(created_at) = date('now') THEN 1 ELSE 0 END), 0) AS today FROM page_views",
-        )
-        .first<{ today: number }>(),
+        .prepare("SELECT views, jumps FROM daily_stats WHERE day = ?")
+        .bind(todayKey())
+        .first<{ views: number; jumps: number }>(),
       db.prepare("SELECT COUNT(*) AS count FROM comments WHERE status = 'approved'").first<{ count: number }>(),
       db
-        .prepare("SELECT link_status, COUNT(*) AS count FROM sites WHERE is_visible = 1 GROUP BY link_status")
+        .prepare("SELECT link_status, COUNT(*) AS count FROM sites GROUP BY link_status")
         .all<{ link_status: string; count: number }>(),
     ]);
 
@@ -89,22 +104,25 @@ publicRoutes.get("/nav", async (context) => {
   for (const site of sites) {
     for (const tag of site.tags) tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + 1);
   }
-  const tags = [...tagCounts.entries()]
+  // 前台标签栏全量返回：按次数降序（热门在前），次数相同按名称拼音升序，保证顺序稳定
+  const tags: NavTag[] = [...tagCounts.entries()]
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], "zh-CN"))
-    .slice(0, 30)
-    .map(([tag]) => tag);
+    .map(([name, count]) => ({ name, count }));
 
   const links: Record<string, number> = {};
   for (const row of linkGroups.results ?? []) links[row.link_status] = row.count;
 
   const stats: NavStats = {
     totalSites: siteTotals?.sites ?? sites.length,
-    totalViews: siteTotals?.views ?? 0,
+    // 全站浏览 = 站点详情页 + 所有独立页面（含首页、关于页）的累计浏览量
+    totalViews: (siteTotals?.views ?? 0) + (pageTotals?.views ?? 0),
+    totalJumps: siteTotals?.jumps ?? 0,
     totalComments: commentTotals?.count ?? 0,
     healthyLinks: links.alive ?? 0,
     deadLinks: links.dead ?? 0,
     unknownLinks: links.unknown ?? 0,
-    todayViews: viewTotals?.today ?? 0,
+    todayViews: todayStats?.views ?? 0,
+    todayJumps: todayStats?.jumps ?? 0,
   };
 
   const pages: NavPage[] = (pageResult.results ?? []).map((row) => ({
@@ -134,12 +152,7 @@ publicRoutes.get("/pages/:slug", async (context) => {
     .bind(context.req.param("slug"))
     .first<PageRow>();
   if (!row) return context.json({ error: "没有找到这个页面" }, 404);
-  const updated = await context.env.DB.prepare(
-    "UPDATE pages SET views = views + 1 WHERE id = ? RETURNING views",
-  )
-    .bind(row.id)
-    .first<{ views: number }>();
-  return context.json(mapPublicPage({ ...row, views: updated?.views ?? (row.views ?? 0) + 1 }));
+  return context.json(mapPublicPage(row));
 });
 
 publicRoutes.get("/sites/:slug", async (context) => {
@@ -147,43 +160,55 @@ publicRoutes.get("/sites/:slug", async (context) => {
   const row = await context.env.DB.prepare(
     `SELECT s.*, c.name AS category_name, c.slug AS category_slug
      FROM sites s JOIN categories c ON c.id = s.category_id
-     WHERE s.slug = ? AND s.is_visible = 1 AND s.detail_enabled = 1`,
+     WHERE s.slug = ?`,
   )
     .bind(slug)
     .first<SiteRow>();
   if (!row) return context.json({ error: "没有找到这个站点" }, 404);
-  const path = await categoryPath(context.env.DB, row.category_id);
-  return context.json(mapSiteDetail(row, path));
+  const categoryTrail = await categoryPath(context.env.DB, row.category_id);
+  return context.json(mapSiteDetail(row, categoryTrail));
 });
 
 publicRoutes.post("/sites/:id/jump", async (context) => {
   const id = Number.parseInt(context.req.param("id"), 10);
   if (!Number.isFinite(id)) return context.json({ error: "无效的站点" }, 400);
-  const row = await context.env.DB.prepare(
-    "UPDATE sites SET views = views + 1 WHERE id = ? AND is_visible = 1 RETURNING views",
-  )
-    .bind(id)
-    .first<{ views: number }>();
-  if (!row) return context.json({ error: "没有找到这个站点" }, 404);
-  return context.json({ views: row.views });
+  const hit = await context.env.DB.prepare("UPDATE sites SET jumps = jumps + 1 WHERE id = ?").bind(id).run();
+  if (!hit.meta.changes) return context.json({ error: "没有找到这个站点" }, 404);
+  await bumpDailyStat(context.env.DB, "jumps");
+  return context.json({ ok: true });
 });
 
 publicRoutes.post("/views", async (context) => {
-  let body: { path?: unknown };
+  let body: { kind?: unknown; id?: unknown };
   try {
     body = await context.req.json();
   } catch {
     return context.json({ error: "无效的请求" }, 400);
   }
-  const path = typeof body.path === "string" && body.path.startsWith("/") ? body.path.slice(0, 200) : "/";
-  await context.env.DB.prepare("INSERT INTO page_views (path) VALUES (?)").bind(path).run();
+  const kind = typeof body.kind === "string" ? body.kind : "";
+  if (kind !== "site" && kind !== "page") {
+    return context.json({ error: "无效的页面类型" }, 400);
+  }
+  const id = Number(body.id);
+  if (!Number.isInteger(id) || id <= 0) {
+    return context.json({ error: "无效的页面" }, 400);
+  }
+  const table = kind === "site" ? "sites" : "pages";
+  // 一行更新该页面的累计浏览量，一行更新今天的总浏览量，同一个 batch 提交
+  await context.env.DB.batch([
+    context.env.DB.prepare(`UPDATE ${table} SET views = views + 1 WHERE id = ?`).bind(id),
+    context.env.DB.prepare(
+      `INSERT INTO daily_stats (day, views, jumps) VALUES (?, 1, 0)
+       ON CONFLICT(day) DO UPDATE SET views = daily_stats.views + 1`,
+    ).bind(todayKey()),
+  ]);
   return context.json({ ok: true });
 });
 
 publicRoutes.get("/sites/:slug/comments", async (context) => {
   const slug = context.req.param("slug");
   const site = await context.env.DB.prepare(
-    "SELECT id FROM sites WHERE slug = ? AND is_visible = 1 AND detail_enabled = 1",
+    "SELECT id FROM sites WHERE slug = ?",
   )
     .bind(slug)
     .first<{ id: number }>();
@@ -194,7 +219,7 @@ publicRoutes.get("/sites/:slug/comments", async (context) => {
   const offset = (page - 1) * pageSize;
   const [list, total] = await Promise.all([
     context.env.DB.prepare(
-      `SELECT id, site_id, page_id, author, website, content, created_at FROM comments
+      `SELECT id, site_id, page_id, author, website, content, created_at, ip_location FROM comments
        WHERE site_id = ? AND status = 'approved'
        ORDER BY datetime(created_at) DESC, id DESC LIMIT ? OFFSET ?`,
     )
@@ -207,6 +232,7 @@ publicRoutes.get("/sites/:slug/comments", async (context) => {
         website: string;
         content: string;
         created_at: string;
+        ip_location: string;
       }>(),
     context.env.DB.prepare("SELECT COUNT(*) AS count FROM comments WHERE site_id = ? AND status = 'approved'")
       .bind(site.id)
@@ -235,7 +261,7 @@ publicRoutes.get("/pages/:slug/comments", async (context) => {
   const offset = (pageNumber - 1) * pageSize;
   const [list, total] = await Promise.all([
     context.env.DB.prepare(
-      `SELECT id, site_id, page_id, author, website, content, created_at FROM comments
+      `SELECT id, site_id, page_id, author, website, content, created_at, ip_location FROM comments
        WHERE page_id = ? AND status = 'approved'
        ORDER BY datetime(created_at) DESC, id DESC LIMIT ? OFFSET ?`,
     )
@@ -248,6 +274,7 @@ publicRoutes.get("/pages/:slug/comments", async (context) => {
         website: string;
         content: string;
         created_at: string;
+        ip_location: string;
       }>(),
     context.env.DB.prepare("SELECT COUNT(*) AS count FROM comments WHERE page_id = ? AND status = 'approved'")
       .bind(page.id)
@@ -273,8 +300,7 @@ publicRoutes.get("/recent-comments", async (context) => {
      LEFT JOIN sites s ON s.id = c.site_id
      LEFT JOIN pages p ON p.id = c.page_id
      WHERE c.status = 'approved'
-       AND ((c.site_id IS NOT NULL AND s.is_visible = 1)
-         OR (c.page_id IS NOT NULL AND p.is_published = 1))
+       AND (c.site_id IS NOT NULL OR (c.page_id IS NOT NULL AND p.is_published = 1))
      ORDER BY datetime(c.created_at) DESC, c.id DESC LIMIT ?`,
   )
     .bind(limit)
@@ -315,7 +341,7 @@ function spamReason(author: string, content: string, bannedWords: string): strin
 
 publicRoutes.post("/sites/:slug/comments", async (context) => {
   const site = await context.env.DB.prepare(
-    "SELECT id FROM sites WHERE slug = ? AND is_visible = 1 AND detail_enabled = 1",
+    "SELECT id FROM sites WHERE slug = ?",
   )
     .bind(context.req.param("slug"))
     .first<{ id: number }>();
@@ -373,21 +399,24 @@ async function submitComment(
   if (reason) return context.json({ error: reason }, 400);
 
   const ipHash = (await visitorHash(context.req.raw, context.env)).slice(0, 24);
+  const ip = clientIp(context.req.raw).slice(0, 64);
+  const userAgent = (context.req.header("user-agent") ?? "").slice(0, 400);
+  const { device, browser, os } = parseUserAgent(userAgent);
   const recent = await context.env.DB.prepare(
-    "SELECT COUNT(*) AS count FROM comments WHERE ip_hash = ? AND datetime(created_at) > datetime('now', '-10 minutes')",
+    "SELECT COUNT(*) AS count FROM comments WHERE ip_hash = ? AND datetime(created_at) > datetime('now', '+8 hours', '-10 minutes')",
   )
     .bind(ipHash)
     .first<{ count: number }>();
   if ((recent?.count ?? 0) >= 3) return context.json({ error: "提交过于频繁，请稍后再试" }, 429);
   const daily = await context.env.DB.prepare(
-    "SELECT COUNT(*) AS count FROM comments WHERE ip_hash = ? AND datetime(created_at) > datetime('now', '-1 day')",
+    "SELECT COUNT(*) AS count FROM comments WHERE ip_hash = ? AND datetime(created_at) > datetime('now', '+8 hours', '-1 day')",
   )
     .bind(ipHash)
     .first<{ count: number }>();
   if ((daily?.count ?? 0) >= 15) return context.json({ error: "今天提交的评论已达上限" }, 429);
 
   const duplicate = await context.env.DB.prepare(
-    "SELECT id FROM comments WHERE ip_hash = ? AND content = ? AND datetime(created_at) > datetime('now', '-10 minutes')",
+    "SELECT id FROM comments WHERE ip_hash = ? AND content = ? AND datetime(created_at) > datetime('now', '+8 hours', '-10 minutes')",
   )
     .bind(ipHash, content)
     .first();
@@ -395,15 +424,40 @@ async function submitComment(
 
   const status = settings.commentModeration ? "pending" : "approved";
   const result = await context.env.DB.prepare(
-    "INSERT INTO comments (site_id, page_id, author, email, website, content, status, ip_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    "INSERT INTO comments (site_id, page_id, author, email, website, content, status, ip_hash, ip, user_agent, device, browser, os, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
   )
-    .bind(target.siteId, target.pageId, author, email, website, content, status, ipHash)
+    .bind(
+      target.siteId,
+      target.pageId,
+      author,
+      email,
+      website,
+      content,
+      status,
+      ipHash,
+      ip,
+      userAgent,
+      device,
+      browser,
+      os,
+      nowBeijing(),
+      nowBeijing(),
+    )
     .run();
   const id = Number(result.meta.last_row_id);
 
+  // 归属地是外部接口，放后台补写：提交不等它，解析失败也不影响这条评论
+  if (ip) {
+    context.executionCtx.waitUntil(
+      fillCommentLocation(context.env, id, ip).catch((error) => {
+        console.error("Failed to resolve comment ip location", error);
+      }),
+    );
+  }
+
   if (status === "approved") {
     const row = await context.env.DB.prepare(
-      "SELECT id, site_id, page_id, author, website, content, created_at FROM comments WHERE id = ?",
+      "SELECT id, site_id, page_id, author, website, content, created_at, ip_location FROM comments WHERE id = ?",
     )
       .bind(id)
       .first<{
@@ -414,6 +468,7 @@ async function submitComment(
         website: string;
         content: string;
         created_at: string;
+        ip_location: string;
       }>();
     return context.json({
       ok: true,

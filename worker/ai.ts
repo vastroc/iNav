@@ -1,4 +1,5 @@
-import type { AiProvider, SiteSettings, AiKeyStatus } from "../shared/types";
+import type { AiKeyStatus, AiProvider, SiteSettings } from "../shared/types";
+import { DEFAULT_AI_PROMPT, aiProviderPreset, renderAiPrompt } from "../shared/ai";
 import type { Env } from "./env";
 
 export interface DescriptionInput {
@@ -15,45 +16,55 @@ export interface DescriptionResult {
   model: string;
 }
 
+/** 单次 AI 请求超时。后台生成走 waitUntil，响应返回后最多还能跑 30s，这里留出落库余量 */
+const AI_TIMEOUT_MS = 22000;
+
 export function defaultModel(provider: AiProvider): string {
-  switch (provider) {
-    case "deepseek":
-      return "deepseek-chat";
-    case "gemini":
-      return "gemini-2.5-flash";
-    case "openai":
-      return "gpt-4o-mini";
-    default:
-      return "openai";
-  }
+  return aiProviderPreset(provider).model;
 }
 
-export function aiKeysStatus(env: Env): AiKeyStatus {
+/** 按预设顺序取第一个存在的密钥；custom 优先用设置里填的 */
+export function aiApiKey(env: Env, settings: SiteSettings, provider: AiProvider): string {
+  const preset = aiProviderPreset(provider);
+  if (preset.settingsKey && settings.aiApiKey) return settings.aiApiKey;
+  for (const name of preset.keyEnv) {
+    const value = (env as unknown as Record<string, string | undefined>)[name];
+    if (value) return value;
+  }
+  return "";
+}
+
+/** 该供应商当前是否具备生成条件（有密钥、自定义还要求接口地址和模型） */
+export function aiConfigured(env: Env, settings: SiteSettings, provider = settings.aiProvider): boolean {
+  const preset = aiProviderPreset(provider);
+  if (preset.protocol === "pollinations") return true;
+  const base = settings.aiBaseUrl || env.AI_BASE_URL || preset.baseUrl;
+  if (!base) return false;
+  if (!(settings.aiModel || preset.model) && provider === "custom") return false;
+  return Boolean(aiApiKey(env, settings, provider));
+}
+
+export function aiKeysStatus(env: Env, settings: SiteSettings): AiKeyStatus {
   return {
     pollinations: true,
-    openai: Boolean(env.AI_API_KEY),
+    openai: Boolean(env.OPENAI_API_KEY || env.AI_API_KEY),
     deepseek: Boolean(env.DEEPSEEK_API_KEY || env.AI_API_KEY),
     gemini: Boolean(env.GEMINI_API_KEY || env.AI_API_KEY),
+    qwen: Boolean(env.DASHSCOPE_API_KEY || env.QWEN_API_KEY || env.AI_API_KEY),
+    volcengine: Boolean(env.ARK_API_KEY || env.VOLCENGINE_API_KEY || env.AI_API_KEY),
+    custom: Boolean(settings.aiApiKey || env.AI_API_KEY),
   };
 }
 
-function buildPrompt(input: DescriptionInput): string {
-  const lines = [
-    "你是「锦囊书签」的编辑。请为下面这个网站写一段中文介绍。",
-    "要求：",
-    "1. 45-85 个汉字，1-2 句话，信息密度高。",
-    "2. 说明它是什么、主要用途、适合谁。",
-    "3. 客观克制，不使用营销口吻，不编造功能。",
-    "4. 不要以“该网站”“这是一个”开头；不要标题、引号、项目符号或换行。",
-    "5. 只输出介绍正文。",
-    "",
-    `网站名称：${input.name}`,
-    `网址：${input.url}`,
-    input.categoryName ? `所属分类：${input.categoryName}` : "",
-    input.tags?.length ? `标签：${input.tags.join("、")}` : "",
-    input.currentDescription ? `已有描述（仅作为参考，不要照抄）：${input.currentDescription}` : "",
-  ];
-  return lines.filter(Boolean).join("\n");
+function buildPrompt(input: DescriptionInput, settings: SiteSettings): string {
+  return renderAiPrompt(settings.aiPrompt || DEFAULT_AI_PROMPT, {
+    siteName: settings.siteName || "锦囊书签",
+    name: input.name,
+    url: input.url,
+    category: input.categoryName ?? "",
+    tags: input.tags?.join("、") ?? "",
+    description: input.currentDescription ?? "",
+  });
 }
 
 function cleanDescription(raw: string): string {
@@ -68,23 +79,45 @@ function cleanDescription(raw: string): string {
   return text;
 }
 
-async function timedFetch(url: string, init: RequestInit, timeout = 25000): Promise<Response> {
-  return fetch(url, { ...init, signal: AbortSignal.timeout(timeout) });
+async function timedFetch(url: string, init: RequestInit, timeout = AI_TIMEOUT_MS): Promise<Response> {
+  try {
+    return await fetch(url, { ...init, signal: AbortSignal.timeout(timeout) });
+  } catch (error) {
+    const name = (error as { name?: string } | null)?.name ?? "";
+    if (name === "TimeoutError" || name === "AbortError") {
+      throw new Error(`AI 服务 ${Math.round(timeout / 1000)} 秒内没有响应，请稍后重试或换一个服务`);
+    }
+    throw new Error(`无法连接 AI 服务：${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function missingKeyMessage(provider: AiProvider): string {
+  const preset = aiProviderPreset(provider);
+  const names = preset.keyEnv.filter((name) => name !== "AI_API_KEY");
+  const hint = names.length ? names.join(" 或 ") : "AI_API_KEY";
+  return `未配置 ${hint}（${preset.label}）`;
+}
+
+function resolveBaseUrl(env: Env, settings: SiteSettings, provider: AiProvider): string {
+  const preset = aiProviderPreset(provider);
+  // 后台填的接口地址优先，其次环境变量，最后用预设默认值
+  const base = settings.aiBaseUrl || env.AI_BASE_URL || preset.baseUrl;
+  if (!base) throw new Error("自定义接口需要先在「设置 → AI 简介」里填写接口地址（例如 https://api.example.com/v1）");
+  return base.replace(/\/$/, "");
 }
 
 async function viaOpenAICompatible(
-  provider: "openai" | "deepseek",
+  provider: AiProvider,
   env: Env,
   settings: SiteSettings,
   prompt: string,
 ): Promise<string> {
-  const isDeepSeek = provider === "deepseek";
-  const apiKey = isDeepSeek ? env.DEEPSEEK_API_KEY || env.AI_API_KEY : env.AI_API_KEY;
-  if (!apiKey) {
-    throw new Error(isDeepSeek ? "未配置 DEEPSEEK_API_KEY" : "未配置 AI_API_KEY");
-  }
-  const base = (settings.aiBaseUrl || env.AI_BASE_URL || (isDeepSeek ? "https://api.deepseek.com/v1" : "https://api.openai.com/v1")).replace(/\/$/, "");
-  const model = settings.aiModel || defaultModel(provider);
+  const preset = aiProviderPreset(provider);
+  const apiKey = aiApiKey(env, settings, provider);
+  if (!apiKey) throw new Error(missingKeyMessage(provider));
+  const base = resolveBaseUrl(env, settings, provider);
+  const model = settings.aiModel || preset.model;
+  if (!model) throw new Error("请先在「设置 → AI 简介」里填写模型名称");
   const response = await timedFetch(`${base}/chat/completions`, {
     method: "POST",
     headers: {
@@ -104,7 +137,7 @@ async function viaOpenAICompatible(
   });
   if (!response.ok) {
     const detail = (await response.text()).slice(0, 180);
-    throw new Error(`AI 服务返回 ${response.status}${detail ? `：${detail}` : ""}`);
+    throw new Error(`${preset.label} 返回 ${response.status}${detail ? `：${detail}` : ""}`);
   }
   const data = (await response.json()) as { choices?: Array<{ message?: { content?: string } }> };
   const content = data.choices?.[0]?.message?.content;
@@ -150,12 +183,13 @@ async function viaPollinations(env: Env, settings: SiteSettings, prompt: string)
 }
 
 async function viaGemini(env: Env, settings: SiteSettings, prompt: string): Promise<string> {
-  const apiKey = env.GEMINI_API_KEY || env.AI_API_KEY;
-  if (!apiKey) throw new Error("未配置 GEMINI_API_KEY");
+  const apiKey = aiApiKey(env, settings, "gemini");
+  if (!apiKey) throw new Error(missingKeyMessage("gemini"));
   const model = settings.aiModel || defaultModel("gemini");
-  const base = settings.aiBaseUrl || "https://generativelanguage.googleapis.com/v1beta";
+  if (!model) throw new Error("请先在「设置 → AI 简介」里填写模型名称");
+  const base = resolveBaseUrl(env, settings, "gemini");
   const response = await timedFetch(
-    `${base.replace(/\/$/, "")}/models/${encodeURIComponent(model)}:generateContent`,
+    `${base}/models/${encodeURIComponent(model)}:generateContent`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
@@ -184,16 +218,18 @@ export async function generateDescription(
   override?: { provider?: AiProvider; model?: string; baseUrl?: string },
 ): Promise<DescriptionResult> {
   const provider = override?.provider ?? settings.aiProvider;
+  const preset = aiProviderPreset(provider);
   const effective: SiteSettings = {
     ...settings,
     aiProvider: provider,
-    aiModel: override?.model || settings.aiModel || defaultModel(provider),
+    aiModel: override?.model || settings.aiModel || preset.model,
     aiBaseUrl: override?.baseUrl ?? settings.aiBaseUrl,
+    aiPrompt: settings.aiPrompt || DEFAULT_AI_PROMPT,
   };
-  const prompt = buildPrompt(input);
+  const prompt = buildPrompt(input, effective);
   let raw: string;
-  if (provider === "pollinations") raw = await viaPollinations(env, effective, prompt);
-  else if (provider === "gemini") raw = await viaGemini(env, effective, prompt);
+  if (preset.protocol === "pollinations") raw = await viaPollinations(env, effective, prompt);
+  else if (preset.protocol === "gemini") raw = await viaGemini(env, effective, prompt);
   else raw = await viaOpenAICompatible(provider, env, effective, prompt);
 
   const description = cleanDescription(raw);

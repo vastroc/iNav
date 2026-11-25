@@ -11,6 +11,13 @@ export interface Env {
   AI_BASE_URL?: string;
   DEEPSEEK_API_KEY?: string;
   GEMINI_API_KEY?: string;
+  OPENAI_API_KEY?: string;
+  /** 通义千问 / 阿里云百炼 */
+  DASHSCOPE_API_KEY?: string;
+  QWEN_API_KEY?: string;
+  /** 火山方舟（豆包） */
+  ARK_API_KEY?: string;
+  VOLCENGINE_API_KEY?: string;
 }
 
 export interface SessionUser {
