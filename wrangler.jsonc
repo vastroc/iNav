@@ -2,7 +2,7 @@
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "inav",
 	"main": "worker/index.ts",
-	"compatibility_date": "2026-11-25",
+	"compatibility_date": "2026-09-01",
 	"keep_vars": true,
 	"assets": {
 		"directory": "./dist",
@@ -23,8 +23,9 @@
 			"migrations_dir": "migrations"
 		}
 	],
-	// 不做定时任务：链接检测只在新增/修改站点和后台手动点「检测链接」时触发
 	"observability": {
-		"enabled": true
+		"enabled": true,
+		"traces": { "enabled": true },    // 追踪
+		"issues": { "enabled": true }     // 问题
 	}
 }

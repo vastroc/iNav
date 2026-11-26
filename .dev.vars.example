@@ -16,13 +16,14 @@ GITHUB_CLIENT_ID=
 GITHUB_CLIENT_SECRET=
 
 # 逗号分隔的管理员 GitHub 用户名；不填则没有人能登录后台。
+# 这是唯一的授权来源：后台「设置 → 管理员」只读展示，不能在那里增删。
 ADMIN_GITHUB_LOGINS=
 
 # 可选：AI 自动简介。不配任何 Key 也能用免费的 Pollinations。（模型与接口地址在后台「设置 → AI 简介」里配置）
 # AI_BASE_URL=         # 一般不用设，后台设置的接口地址优先
-# AI_API_KEY=          # 通用兜底
 # DEEPSEEK_API_KEY=
 # DASHSCOPE_API_KEY=   # 通义千问（阿里云百炼），也可用 QWEN_API_KEY
 # ARK_API_KEY=         # 火山方舟（豆包），也可用 VOLCENGINE_API_KEY
 # OPENAI_API_KEY=
 # GEMINI_API_KEY=
+# AI_API_KEY=          # 通用兜底

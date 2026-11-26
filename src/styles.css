@@ -157,6 +157,26 @@ button { cursor: pointer; }
 .admin-empty { padding: 38px 18px; color: var(--faint); text-align: center; font-size: 13px; }
 .admin-loading { padding: 38px; color: var(--faint); text-align: center; }
 .admin-muted { color: var(--muted); font-size: 12.5px; }
+/* 正文里出现的变量名 / 命令，例如 ADMIN_GITHUB_LOGINS */
+.admin-code { padding: 1px 4px; border: 1px solid var(--line); border-radius: 3px; background: var(--panel-soft); font-family: Consolas, monospace; font-size: 11.5px; }
+/* 管理员名单只读展示：给到正文级对比度，别用 .admin-tag 默认的灰字 */
+.admin-logins { margin: 0; }
+.admin-logins .admin-tag { color: var(--text); border-color: var(--line-strong); background: var(--panel); font-size: 12px; line-height: 20px; padding: 0 8px; }
+/* 管理员区块：状态 → 用户名 → 说明，三段贴紧一点，别被 settings-section 的 gap 撑散 */
+.admin-meta { display: flex; flex-direction: column; gap: 6px; }
+.admin-meta > p { margin: 0; }
+.admin-status { display: flex; align-items: center; gap: 6px; margin: 0; font-size: 12.5px; }
+.admin-status::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.admin-status--ok { color: var(--ok); }
+.admin-status--warn { color: var(--warn); }
+/* AI 密钥的三点说明 */
+.admin-notes { display: flex; flex-direction: column; gap: 2px; margin: 0; padding-left: 17px; color: var(--muted); font-size: 12.5px; }
+.admin-notes li::marker { color: var(--faint); }
+/* 提示词变量：短串标签比「顿号连成一行」好扫读 */
+.ai-vars { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 6px; }
+.ai-vars__label { margin-right: 1px; color: var(--muted); font-size: 12.5px; }
+.ai-vars__item { display: inline-flex; align-items: baseline; gap: 5px; padding: 1px 7px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-soft); color: var(--muted); font-size: 11.5px; line-height: 18px; }
+.ai-vars__item code { font-family: Consolas, monospace; font-size: 11px; color: var(--text-soft); }
 
 /* AI 简介状态：已生成（蓝）/ 生成中（黄）/ 失败（红，可点重试） */
 .ai-badge { display: inline-flex; align-items: center; flex: none; gap: 3px; margin-left: 0; padding: 1px 7px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-soft); color: var(--muted); font-size: 11px; line-height: 16px; white-space: nowrap; }
@@ -391,6 +411,8 @@ textarea.ai-prompt { width: 100%; min-height: 190px; font-family: inherit; line-
 .drawer-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; padding-top: 10px; border-top: 1px solid var(--line); }
 .settings-form { display: flex; flex-direction: column; gap: 14px; }
 .settings-section { padding: 14px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); display: flex; flex-direction: column; gap: 10px; }
+/* 管理员区块三段（状态/用户名/说明）本来就是一组，间距收窄一点 */
+.settings-section--tight { gap: 8px; }
 .settings-section h2 { margin: 0 0 2px; font-size: 14px; font-weight: 600; }
 
 /* drawer */

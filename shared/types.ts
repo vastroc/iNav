@@ -70,12 +70,21 @@ export interface SiteSettings {
   siteDescription: string;
   footerText: string;
   seoKeywords: string;
+  /**
+   * @deprecated 旧版「后台填写管理员名单」的存量值，仅用于升级提示，**不参与授权**。
+   * 可登录后台的用户只认环境变量 ADMIN_GITHUB_LOGINS，后台已改为只读展示。
+   */
   githubAdmins: string;
   aiProvider: AiProvider;
   aiModel: string;
   aiBaseUrl: string;
-  /** 自定义接口的密钥；GET /api/admin/settings 会脱敏为空串，只回 aiApiKeySet */
+  /** 自定义接口的密钥（旧字段，兼容存量数据）；新配置按供应商存在 aiKeys 里 */
   aiApiKey: string;
+  /**
+   * 各供应商在后台设置里保存的密钥，键是 provider id。
+   * 只在 worker 侧使用：GET /api/admin/settings 会整块剥掉，只回 aiKeySaved 的布尔值。
+   */
+  aiKeys?: Partial<Record<AiProvider, string>>;
   /** 生成简介的提示词模板，支持 {name} 这类变量 */
   aiPrompt: string;
   commentsEnabled: boolean;
@@ -214,6 +223,8 @@ export interface AuthUser {
 
 export interface AuthConfig {
   githubEnabled: boolean;
+  /** 环境变量 ADMIN_GITHUB_LOGINS 是否配了人；为 false 时谁都无法登录，登录页要明确提示 */
+  adminLoginsConfigured: boolean;
 }
 
 export interface AdminComment {
@@ -263,10 +274,13 @@ export interface AiKeyStatus {
 
 export interface AdminSettingsPayload {
   settings: SiteSettings;
+  /** 该供应商当前能不能生成（设置里存了、或环境变量里有） */
   aiKeys: AiKeyStatus;
-  /** 设置里是否已保存自定义接口密钥（密钥本体不下发） */
-  aiApiKeySet: boolean;
+  /** 各供应商在「设置」里是否存过密钥，用于输入框的占位提示（密钥本体不下发） */
+  aiKeySaved: Record<AiProvider, boolean>;
   githubOauthConfigured: boolean;
+  /** 环境变量里配置的管理员 GitHub 用户名（小写），后台只读展示，不接受写回 */
+  adminLoginsFromEnv: string[];
 }
 
 export interface LinkCheckResult {

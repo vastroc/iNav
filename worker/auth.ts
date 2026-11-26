@@ -4,11 +4,11 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { AuthConfig, AuthUser } from "../shared/types";
 import type { AppEnv, SessionUser } from "./env";
 import {
+  adminLoginsFromEnv,
   base64UrlJson,
   githubOauthConfigured,
   hmacSign,
   hmacVerify,
-  loadSettings,
   parseBase64UrlJson,
   randomToken,
   requestOrigin,
@@ -65,6 +65,9 @@ export async function readSession(context: Context<AppEnv>): Promise<SessionUser
   }
   const payload = parseBase64UrlJson<SessionPayload>(body);
   if (!payload || !payload.login || !payload.exp || payload.exp < Date.now()) return null;
+  // 管理员名单只认环境变量：把人从 ADMIN_GITHUB_LOGINS 里删掉后，手里那张 cookie 必须立刻失效，
+  // 不能等 7 天自然过期——否则「删了还能进」又会变成一个讲不清的现象。
+  if (!adminLoginsFromEnv(context.env).includes(payload.login.toLowerCase())) return null;
   return {
     login: payload.login,
     name: payload.name || payload.login,
@@ -86,18 +89,12 @@ function loginError(context: Context<AppEnv>, code: string) {
   return context.redirect(`/admin/login?error=${encodeURIComponent(code)}`, 302);
 }
 
-function allowedGitHubLogins(env: AppEnv["Bindings"], settingsValue: string): string[] {
-  return `${env.ADMIN_GITHUB_LOGINS ?? ""},${settingsValue}`
-    .split(",")
-    .map((item) => item.trim().toLowerCase())
-    .filter(Boolean);
-}
-
 const authRoutes = new Hono<AppEnv>();
 
 authRoutes.get("/config", (context) => {
   const body: AuthConfig = {
     githubEnabled: githubOauthConfigured(context.env),
+    adminLoginsConfigured: adminLoginsFromEnv(context.env).length > 0,
   };
   return context.json(body);
 });
@@ -111,6 +108,8 @@ authRoutes.get("/github", async (context) => {
   if (!githubOauthConfigured(context.env)) {
     return loginError(context, "oauth_not_configured");
   }
+  // 名单为空时直接拦下：既省一次 OAuth 往返，也让报错指向真正的原因
+  if (!adminLoginsFromEnv(context.env).length) return loginError(context, "admin_not_configured");
   const state = randomToken(24);
   setCookie(context, STATE_COOKIE, state, {
     ...cookieOptions(context),
@@ -137,8 +136,8 @@ authRoutes.get("/github/callback", async (context) => {
   deleteCookie(context, STATE_COOKIE, { path: "/api/auth" });
 
   if (!githubOauthConfigured(context.env)) return loginError(context, "oauth_not_configured");
+  if (!adminLoginsFromEnv(context.env).length) return loginError(context, "admin_not_configured");
   if (!code || !state || !storedState || state !== storedState) return loginError(context, "state_mismatch");
-
   try {
     const callbackUrl =
       context.env.GITHUB_CALLBACK_URL || `${requestOrigin(context.req.raw, context.env)}/api/auth/github/callback`;
@@ -178,8 +177,8 @@ authRoutes.get("/github/callback", async (context) => {
     };
     if (!githubUser.login) return loginError(context, "oauth_failed");
 
-    const settings = await loadSettings(context.env.DB);
-    const allowed = allowedGitHubLogins(context.env, settings.githubAdmins);
+    // 名单只认环境变量，不再合并后台设置里的旧值（见 adminLoginsFromEnv 的注释）
+    const allowed = adminLoginsFromEnv(context.env);
     if (!allowed.includes(githubUser.login.toLowerCase())) {
       return loginError(context, "not_allowed");
     }

@@ -127,12 +127,13 @@ npx wrangler secret put ADMIN_GITHUB_LOGINS
 | `SITE_URL` | 站点公开地址，如 `https://inav.xxx.workers.dev`，不带结尾斜杠 |
 | `GITHUB_CLIENT_ID` | GitHub OAuth App 的 Client ID |
 | `GITHUB_CLIENT_SECRET` | GitHub OAuth App 的 Client Secret |
-| `ADMIN_GITHUB_LOGINS` | 管理员 GitHub 用户名，多个用逗号分隔 |
+| `ADMIN_GITHUB_LOGINS` | 管理员 GitHub 用户名，多个用逗号分隔；**唯一的授权来源**，后台设置里只是只读展示 |
 
 要点：
 
 - `SITE_URL` **必须和浏览器地址栏完全一致**（协议、域名、有无 `www` 都算不同），否则后台保存会 403，OAuth 也会失败。绑定自定义域名后记得改。
 - Secret 由 Cloudflare 侧管理，不参与构建。写入后如果后台仍提示未配置，重新部署一次（`npx wrangler deploy`）再刷新。
+- `ADMIN_GITHUB_LOGINS` 是唯一的授权来源：后台「设置 → 管理员」只读展示这份名单，增删必须回到这里。名单为空时没人能登录，`/admin` 会直接说明原因；把某人从名单里删掉，他手里已登录的 cookie 会立刻失效。
 - AI 简介可选，不配 Key 也能用免费的 Pollinations；要指定供应商再设 `DASHSCOPE_API_KEY` / `ARK_API_KEY` / `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY`（或通用 `AI_API_KEY`），模型和接口地址在后台「设置 → AI 简介」里选。
 
 查看已有 Secret 名单：`npx wrangler secret list`（只列名字，不显示值）。
@@ -278,6 +279,9 @@ npx wrangler d1 execute DB --remote --command "ALTER TABLE sites ADD COLUMN xxx 
 
 **登录后立刻掉线 / `SESSION_SECRET must be at least 16 characters`**
 Secret 没设或太短。重设 `SESSION_SECRET` 并重新部署一次。
+
+**登录报「该 GitHub 账号不在管理员名单里」/ 登录页提示未配置管理员名单**
+核对 `ADMIN_GITHUB_LOGINS`：值是 GitHub 用户名（不是邮箱或昵称），多个用英文逗号分隔，大小写不敏感。这一项只能在 Cloudflare 的 Variables and Secrets 里改，后台设置页是只读的。
 
 **后台保存返回 403**
 浏览器地址与 `SITE_URL` 不一致（`http`/`https`、`www`、结尾斜杠都算不同）。改成实际 origin。

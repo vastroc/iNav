@@ -10,10 +10,11 @@ import type {
   SiteSettings,
 } from "../shared/types";
 import type { AppEnv, Env } from "./env";
-import { aiConfigured, aiKeysStatus, defaultModel, generateDescription } from "./ai";
+import { aiConfigured, aiKeysSaved, aiKeysStatus, defaultModel, generateDescription } from "./ai";
 import { AI_PROVIDERS, DEFAULT_AI_PROMPT } from "../shared/ai";
 import { checkOneSite, checkSites } from "./linkcheck";
 import {
+  adminLoginsFromEnv,
   categoryDescendants,
   clampInt,
   githubOauthConfigured,
@@ -907,13 +908,16 @@ adminRoutes.delete("/comments/:id", async (context) => {
   return context.json({ ok: true });
 });
 
-/** 设置下发前统一脱敏：只回「是否已保存密钥」，不回明文 */
+/** 设置下发前统一脱敏：aiKeys / aiApiKey 全部剥掉，只回各供应商「是否已保存」的布尔值 */
 function settingsPayload(env: Env, settings: SiteSettings): AdminSettingsPayload {
+  const clean: SiteSettings = { ...settings, aiApiKey: "" };
+  delete clean.aiKeys;
   return {
-    settings: { ...settings, aiApiKey: "" },
+    settings: clean,
     aiKeys: aiKeysStatus(env, settings),
-    aiApiKeySet: Boolean(settings.aiApiKey),
+    aiKeySaved: aiKeysSaved(settings),
     githubOauthConfigured: githubOauthConfigured(env),
+    adminLoginsFromEnv: adminLoginsFromEnv(env),
   };
 }
 
@@ -922,17 +926,19 @@ adminRoutes.get("/settings", async (context) => {
   return context.json(settingsPayload(context.env, settings));
 });
 
+/**
+ * 普通设置项：camelCase 请求字段 → settings 表键名。
+ * 密钥（ai_keys_*）不在这里，单独处理，因为它按供应商分行存储。
+ */
 const SETTING_FIELDS: Record<string, keyof SiteSettings> = {
   site_name: "siteName",
   site_tagline: "siteTagline",
   site_description: "siteDescription",
   footer_text: "footerText",
   seo_keywords: "seoKeywords",
-  github_admins: "githubAdmins",
   ai_provider: "aiProvider",
   ai_model: "aiModel",
   ai_base_url: "aiBaseUrl",
-  ai_api_key: "aiApiKey",
   ai_prompt: "aiPrompt",
   comments_enabled: "commentsEnabled",
   comment_moderation: "commentModeration",
@@ -964,13 +970,6 @@ adminRoutes.put("/settings", async (context) => {
       } else {
         updates.push([dbKey, ""]);
       }
-    } else if (dbKey === "github_admins") {
-      const admins = String(value ?? "")
-        .split(/[,，\s]+/)
-        .map((item) => item.trim())
-        .filter((item) => /^[a-zA-Z0-9-]{1,39}$/.test(item))
-        .join(",");
-      updates.push([dbKey, admins]);
     } else if (dbKey === "seo_keywords") {
       updates.push([dbKey, text(value, 300, "SEO 关键词")]);
     } else if (dbKey === "banned_words") {
@@ -981,9 +980,6 @@ adminRoutes.put("/settings", async (context) => {
       const model = text(value, 100, "AI 模型");
       const provider = parseProvider(body.aiProvider) ?? currentSettings.aiProvider;
       updates.push([dbKey, model || defaultModel(provider)]);
-    } else if (dbKey === "ai_api_key") {
-      // 留空表示清除已保存的密钥；接口从不回传明文，前端只在用户重新填写时才提交
-      updates.push([dbKey, text(value, 300, "AI API Key")]);
     } else if (dbKey === "ai_prompt") {
       updates.push([dbKey, text(value, 4000, "AI 提示词") || DEFAULT_AI_PROMPT]);
     } else {
@@ -991,11 +987,32 @@ adminRoutes.put("/settings", async (context) => {
       updates.push([dbKey, text(value, max, "设置项")]);
     }
   }
-  if (!updates.length) fail("没有需要保存的设置");
 
-  // 自定义接口必须自带地址和模型，否则保存后也无法生成，直接拦在保存这一步
+  // AI 密钥按供应商分行存储（ai_key_<provider>）：换供应商不会串用上一个的密钥。
+  // aiApiKey 传空串表示清除当前供应商已保存的密钥。
+  const deletions: string[] = [];
+  if (has(body, "aiApiKey")) {
+    const keyProvider = parseProvider(body.aiProvider) ?? currentSettings.aiProvider;
+    const key = text(body.aiApiKey, 300, "AI API Key");
+    if (key) {
+      updates.push([`ai_key_${keyProvider}`, key]);
+      // 自定义接口的旧版单行键（ai_api_key）已经废弃，写入新键时顺手清掉，
+      // 否则它会作为兜底又被 loadSettings() 映射回 aiKeys.custom
+      if (keyProvider === "custom") deletions.push("ai_api_key");
+    } else {
+      deletions.push(`ai_key_${keyProvider}`);
+      // 只删 ai_key_custom 不够：旧版单行键还在，等于没清除（这是「自定义接口清不掉 Key」的原因）
+      if (keyProvider === "custom") deletions.push("ai_api_key");
+    }
+  }
+  if (!updates.length && !deletions.length) fail("没有需要保存的设置");
+
+  // 自定义接口必须自带地址和模型，否则保存后也无法生成，直接拦在保存这一步。
+  // 只在表单整体保存时才校验（body 里带 aiBaseUrl / aiModel）；
+  // 「清除密钥」只会传 aiProvider + aiApiKey，不该被地址/模型挡住。
+  const touchesAiConfig = has(body, "aiBaseUrl") || has(body, "aiModel");
   const nextProvider = (updates.find(([key]) => key === "ai_provider")?.[1] ?? currentSettings.aiProvider) as AiProvider;
-  if (nextProvider === "custom") {
+  if (touchesAiConfig && nextProvider === "custom") {
     const base = updates.find(([key]) => key === "ai_base_url")?.[1] ?? currentSettings.aiBaseUrl;
     const model = updates.find(([key]) => key === "ai_model")?.[1] ?? currentSettings.aiModel;
     if (!base) fail("自定义 AI 接口需要填写接口地址，例如 https://api.example.com/v1");
@@ -1007,6 +1024,7 @@ adminRoutes.put("/settings", async (context) => {
       "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
     ).bind(key, value, nowBeijing()),
   );
+  for (const key of deletions) statements.push(db.prepare("DELETE FROM settings WHERE key = ?").bind(key));
   await db.batch(statements);
   const settings = await loadSettings(db);
   return context.json(settingsPayload(context.env, settings));

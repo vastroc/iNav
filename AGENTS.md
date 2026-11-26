@@ -158,8 +158,11 @@ docs/                      README 截图
 - 页脚版权居中，不显示站点数/浏览量；独立页面链接右对齐。
 - AI 生成的简介在卡片和详情页都必须标注「AI 生成」，且该标签固定排标签第一位。
 - **AI 简介是异步任务**：`POST/PUT /api/admin/sites` 在简介留空且 AI 可用时，只把 `ai_pending = 1` 写进库并立即返回（实测响应 ~140ms），生成交给 `ctx.waitUntil()`（Cloudflare 限制：响应返回后 30s，所以单次 AI 请求超时设 22s）。后台书签行在**站点名后面**显示状态胶囊：生成中=黄色「AI 生成中」（脉冲动画）、失败=红色「AI 生成失败 · 重试」、已生成=蓝色「AI 生成」（`ai_generated=1`）。前端每 3s 轮询 `GET /api/admin/sites/:id`，结束即刷新；失败时点击红色胶囊走 `POST /api/admin/sites/:id/generate-description {async:true}` 重新排队（force 覆盖旧简介）。`ai_pending` 超过 5 分钟视为中断，列表改显示红色「AI 生成中断 · 重试」，避免一直转圈。**不要再把生成改回同步阻塞保存。**
-- **AI 供应商**（`shared/ai.ts` 的 `AI_PROVIDER_PRESETS`，worker 与后台共用）：Pollinations / DeepSeek / qwen（通义千问，dashscope compatible-mode）/ volcengine（火山方舟 ark）/ OpenAI / Gemini / custom（任意 OpenAI 兼容）。默认地址、默认模型、密钥环境变量都写在预设里；密钥按预设顺序回退到通用 `AI_API_KEY`。新增供应商只改这一个文件 + `AiProvider` 联合类型。
-- **提示词模板**：设置项 `ai_prompt`（默认值见 `shared/ai.ts` 的 `DEFAULT_AI_PROMPT`），变量 `{siteName} {name} {url} {category} {tags} {description}`，由 `renderAiPrompt()` 逐行渲染，**引用了空变量的整行会被丢弃**。自定义接口的密钥存 `settings.ai_api_key`（仅 custom 使用），`GET/PUT /api/admin/settings` 一律脱敏为 `""`，只回 `aiApiKeySet`；接口地址走 `normalizeUrl()`，内网/本机地址会被拒（防 SSRF），custom 必须同时有地址和模型才能保存。
+- **AI 供应商**（`shared/ai.ts` 的 `AI_PROVIDER_PRESETS`，worker 与后台共用）：DeepSeek / qwen（通义千问，dashscope compatible-mode）/ volcengine（火山方舟 ark）/ OpenAI / Gemini / custom（任意 OpenAI 兼容）/ Pollinations（免费兜底）。默认地址、默认模型、文档链接、`extraBody` 都写在预设里。新增供应商只改这一个文件 + `AiProvider` 联合类型。
+- **密钥存在后台设置里，不是环境变量**：`settings` 表按供应商分行存 `ai_key_<provider>`（`loadSettings()` 汇总成 `settings.aiKeys`），`aiApiKey()` 优先读它，环境变量只作兜底。换供应商不会串用上一个的密钥；`GET /api/admin/settings` 会把 `aiKeys` 和 `aiApiKey` 整块剥掉，只回 `aiKeySaved: Record<provider, boolean>` 给输入框做占位提示；`PUT` 时 `aiApiKey` 非空写入 `ai_key_<当前 aiProvider>`，传空串＝删除该行。
+- **默认模型与「关闭思考」参数按官方文档校准（2026-11）**：DeepSeek 用 `deepseek-flash`（旧名 `deepseek-chat` / `deepseek-reasoner` 由 `resolveAiModel()` 自动映射），并下发 `thinking: {type: "disabled"}`——**DeepSeek 新版默认开启思考模式，不关会把 240 tokens 的额度全花在思考上、正文为空**，这是「生成失败」最常见的原因；千问下发 `enable_thinking: false`，方舟下发 `thinking: {type: "disabled"}`，Gemini 先试 `thinkingConfig.thinkingBudget: 0`。
+- **请求容错**：OpenAI 兼容调用会准备三套请求体（带供应商参数 → 去掉这些参数 → 换 `max_completion_tokens` 且不带 temperature），只在 400/422 时换下一套重试，401/402/429 直接抛原文。空正文时按 `reasoning_content` / `finish_reason` 给出可操作提示，`ai_error` 就是这个文案。
+- **提示词模板**：设置项 `ai_prompt`（默认值见 `shared/ai.ts` 的 `DEFAULT_AI_PROMPT`），变量 `{siteName} {name} {url} {category} {tags} {description}`，由 `renderAiPrompt()` 逐行渲染，**引用了空变量的整行会被丢弃**。接口地址走 `normalizeUrl()`，内网/本机地址会被拒（防 SSRF），custom 必须同时有地址和模型才能保存；`ai_api_key` 是早期只给自定义接口用的旧字段，`loadSettings()` 会把它兼容映射成 `aiKeys.custom`，新数据不再写它。
 - 首页“标签”栏数据契约：`GET /api/nav` 返回 `NavTag { name, count }[]`，**按次数降序、同次数按 `localeCompare(zh-CN)` 升序**，前端渲染成 `名称(次数)`（英文半角括号，次数为 `.tag-count` 灰色小字）。改 `NavPayload.tags` 结构时必须同步 `src/public/main.ts` 的 `tagLinks`、`shared/types.ts` 与 `worker/public.ts`。折叠逻辑见下方「前台实现细节」。
 
 ### 前台实现细节（改样式前先看这里）
@@ -219,7 +222,7 @@ docs/                      README 截图
 - pages：title、slug、excerpt、content、show_in_nav、is_published、sort_order、views（被打开次数）、时间戳。内置两行 `home` / `about` 由迁移写入，`show_in_nav=0`（首页不计入页面菜单、关于页在前台是固定链接）。
 - comments：site_id/page_id 二选一、author、email、website、content、status、ip_hash、ip、ip_location、device、browser、os、created_at、updated_at；没有 user_agent。
 - daily_stats：**每日总量**，主键 `day`（北京时间 YYYY-MM-DD），只有 `views`（当天所有页面被打开的总次数）与 `jumps`（当天所有跳转的总次数）两列。一天一行，跨天写新行，没有任何重置逻辑；今日 = `SELECT views, jumps FROM daily_stats WHERE day = todayKey()`。
-- settings：站点/SEO/评论/AI/管理员配置；AI 相关键为 ai_provider / ai_model / ai_base_url / ai_api_key / ai_prompt（ai_prompt 空值时回退 `DEFAULT_AI_PROMPT`）。**没有 about_content**：关于页正文在 pages 表里。
+- settings：站点/SEO/评论/AI/管理员配置；AI 相关键为 ai_provider / ai_model / ai_base_url / ai_api_key / ai_prompt（ai_prompt 空值时回退 `DEFAULT_AI_PROMPT`）。**没有 about_content**：关于页正文在 pages 表里。`github_admins` 是废弃键：可读（只用于展示旧版名单），不再写入、不参与授权。`ai_api_key` 是旧版单行密钥键：只读兼容（映射为 aiKeys.custom），对 custom 写入/清除密钥时连它一起删——只删 `ai_key_custom` 会让旧键作为兜底复活，表现为「清除无效」。清除密钥时不要校验自定义接口的地址/模型（只传 aiProvider + aiApiKey），该校验只在 body 带 aiBaseUrl/aiModel 的表单保存时执行。
 - 标签没有独立表：后台“标签”tab 由 sites.tags 实时聚合（方案 A）；重命名/删除/合并都是遍历 sites 改写 tags JSON，再经 `parseTags()` 去重截断。
 
 迁移：**只有 `migrations/0001_init.sql` 一个全量初始化文件**，没有增量补丁。改结构就直接改这个文件，然后 `npm run db:reset` 重建本地库（脚本 `scripts/reset-local-db.mjs`：删掉本地 D1 数据文件再应用迁移），远端重新部署时同样按新库建。历史上的 0002–0016 已合并进 0001，不要再新增 `0002_xxx.sql` 这类补丁。
@@ -262,6 +265,7 @@ docs/                      README 截图
 ## 8. 安全约束
 
 - 仅 GitHub OAuth；没有 DEV_LOGIN / 本地快捷登录。
+- 管理员名单只认环境变量 `ADMIN_GITHUB_LOGINS`（`adminLoginsFromEnv()`）。后台「设置 → 管理员」只读展示，`SETTING_FIELDS` 里没有 `github_admins`，写不进去 —— 别把授权重新接回数据库，否则「后台删了、env 里还在」又会变成讲不清的 bug。`readSession()` 每次都比对名单，删人后旧 cookie 立即失效。
 - SESSION_SECRET 至少 16 字符，缺失时认证抛错。
 - 管理写请求校验 Origin（SITE_URL 或当前 origin）。
 - Cookie：HttpOnly、SameSite=Lax、HTTPS Secure。

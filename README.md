@@ -75,8 +75,10 @@
 1. 打开 <https://github.com/settings/developers> → **New OAuth App**。
 2. Homepage URL 填站点地址；Authorization callback URL 填 `https://你的地址/api/auth/github/callback`。
 3. 复制 Client ID，再生成一个 Client Secret。
-4. 打开 Cloudflare 控制台 → Workers & Pages → 你的 Worker → Settings → Variables and Secrets，把 `GITHUB_CLIENT_ID`、`GITHUB_CLIENT_SECRET` 填进去（`ADMIN_GITHUB_LOGINS` 也在这里改）。
+4. 打开 Cloudflare 控制台 → Workers & Pages → 你的 Worker → Settings → Variables and Secrets，把 `GITHUB_CLIENT_ID`、`GITHUB_CLIENT_SECRET` 填进去。
 5. 访问 `/admin` 用白名单里的账号登录。
+
+管理员名单 `ADMIN_GITHUB_LOGINS` 只能在 Cloudflare 的 Variables and Secrets 里改，后台「设置 → 管理员」是只读的——这样不会出现「后台删了、环境变量里还在，照样能登录」的糊涂账。变量改完即时生效，不用重新部署；名单为空时谁都无法登录，登录页会直接给出提示。
 
 变量改完即时生效，不用重新部署。没有配置 OAuth 时 `/admin` 只会显示提示，不存在其他登录入口。
 
@@ -120,11 +122,11 @@
 | `SITE_URL` | 推荐 | 站点公开地址，用于 sitemap、CSRF 校验、OAuth；留空时按请求域名推断，必须与实际访问地址完全一致 |
 | `GITHUB_CLIENT_ID` | 是 | GitHub OAuth App Client ID |
 | `GITHUB_CLIENT_SECRET` | 是 | GitHub OAuth App Secret |
-| `ADMIN_GITHUB_LOGINS` | 是 | 管理员 GitHub 用户名，逗号分隔 |
-| `AI_API_KEY` | 否 | AI 简介的通用 Key，各供应商专用 Key 缺失时兜底 |
-| `DASHSCOPE_API_KEY` / `ARK_API_KEY` / `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` | 否 | 对应供应商的专用 Key |
+| `ADMIN_GITHUB_LOGINS` | 是 | 管理员 GitHub 用户名，逗号分隔。**唯一来源**：后台「设置 → 管理员」只展示这份名单，不能改；把人从这里删掉，对方已登录的会话立刻失效 |
+| `AI_API_KEY` | 否 | 通用兜底 Key，只在后台没填密钥时生效 |
+| `DASHSCOPE_API_KEY` / `ARK_API_KEY` / `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` | 否 | 同上，按供应商兜底 |
 
-AI 供应商、模型和提示词在后台「设置 → AI 简介」里改，不配 Key 也能用免费的 Pollinations。
+**AI 怎么配**：进后台「设置 → AI 简介」，选服务、把 API Key 粘进输入框、保存即可——密钥存在数据库里，**不需要加到 Cloudflare 的环境变量**，换供应商也不会串用。模型名留空就用该服务的默认模型，页面上的「官方文档」链接可以查可用模型。不填任何 Key 也能用免费的 Pollinations，但它限流很严（每 IP 45 秒 1 次、每天 100 次），只适合试玩。
 
 ## 数据模型
 

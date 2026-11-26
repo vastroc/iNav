@@ -73,8 +73,10 @@ interface State {
   settings: SiteSettings | null;
   aiKeys: Record<string, boolean>;
   /** 设置里是否已保存自定义接口的 API Key（接口不下发明文） */
-  aiApiKeySet: boolean;
+  aiKeySaved: Record<string, boolean>;
   githubOauthConfigured: boolean;
+  /** 环境变量里配置的管理员名单（小写），后台只读展示 */
+  adminLoginsFromEnv: string[];
   siteQuery: string;
   siteCategory: number | null;
   sitePage: number;
@@ -109,8 +111,9 @@ const state: State = {
   comments: [],
   settings: null,
   aiKeys: {},
-  aiApiKeySet: false,
+  aiKeySaved: {},
   githubOauthConfigured: false,
+  adminLoginsFromEnv: [],
   siteQuery: "",
   siteCategory: null,
   sitePage: 1,
@@ -292,6 +295,15 @@ async function boot(): Promise<void> {
   }
 }
 
+/** 登录失败时接口回的是错误码，这里翻成人话；未知码原样显示，方便排查 */
+const LOGIN_ERRORS: Record<string, string> = {
+  oauth_not_configured: "GitHub OAuth 尚未配置（GITHUB_CLIENT_ID / GITHUB_CLIENT_SECRET）",
+  admin_not_configured: "服务器未设置管理员名单（ADMIN_GITHUB_LOGINS），任何人都无法登录",
+  state_mismatch: "登录状态已过期，请重新点击登录",
+  oauth_failed: "GitHub 授权失败，请重试",
+  not_allowed: "该 GitHub 账号不在管理员名单里",
+};
+
 function renderLogin(): void {
   const config = state.config;
   const params = new URLSearchParams(location.search);
@@ -299,10 +311,12 @@ function renderLogin(): void {
   app.innerHTML =
     '<div class="login-shell"><a class="login-back" href="/">← 返回前台</a><section class="login-card">' +
     '<span class="login-eyebrow">ADMIN</span><h1>锦囊书签后台</h1><p>维护书签、分类、页面、评论和站点设置。</p>' +
-    (error ? '<p class="admin-error">登录失败：' + esc(error) + "</p>" : "") +
-    (config?.githubEnabled
-      ? '<a class="admin-button admin-button--primary login-github" href="/api/auth/github">使用 GitHub 登录</a>'
-      : '<p class="admin-muted">GitHub OAuth 尚未配置。</p>') +
+    (error ? '<p class="admin-error">登录失败：' + esc(LOGIN_ERRORS[error] ?? error) + "</p>" : "") +
+    (!config?.githubEnabled
+      ? '<p class="admin-muted">GitHub OAuth 尚未配置。</p>'
+      : config.adminLoginsConfigured
+        ? '<a class="admin-button admin-button--primary login-github" href="/api/auth/github">使用 GitHub 登录</a>'
+        : '<p class="admin-error">服务器还没有配置管理员名单：环境变量 <span class="admin-code">ADMIN_GITHUB_LOGINS</span> 为空，现在没有任何人能登录。</p>') +
     '<p class="login-note">修改会立即写入 D1 数据库。</p></section></div>';
 }
 
@@ -2228,8 +2242,9 @@ async function loadSettings(): Promise<void> {
   state.settings = data.settings;
   state.siteName = data.settings.siteName || state.siteName;
   state.aiKeys = data.aiKeys as unknown as Record<string, boolean>;
-  state.aiApiKeySet = !!data.aiApiKeySet;
+  state.aiKeySaved = data.aiKeySaved ?? {};
   state.githubOauthConfigured = data.githubOauthConfigured;
+  state.adminLoginsFromEnv = data.adminLoginsFromEnv ?? [];
   frame(renderSettings());
   bindSettings();
 }
@@ -2247,12 +2262,10 @@ function selectProvider(value: string): string {
 
 function renderSettings(): string {
   const s = state.settings!;
-  const aiConfigured = Object.entries(state.aiKeys)
-    .filter(([, value]) => value)
-    .map(([key]) => key)
-    .join("、");
   const preset = aiProviderPreset(s.aiProvider);
-  const promptVars = AI_PROMPT_VARIABLES.map((item) => "{" + item.key + "} " + item.label).join(" · ");
+  const promptVars = AI_PROMPT_VARIABLES.map(
+    (item) => '<span class="ai-vars__item"><code>{' + esc(item.key) + "}</code>" + esc(item.label) + "</span>",
+  ).join("");
   return (
     pageHead("设置", "前台文案、评论策略和 AI 配置。") +
     '<form class="admin-form settings-form" data-form="settings">' +
@@ -2267,25 +2280,97 @@ function renderSettings(): string {
     '<section class="settings-section"><h2>评论</h2><div class="form-inline"><label class="check-row"><input type="checkbox" name="commentsEnabled" ' + (s.commentsEnabled ? "checked" : "") + "> 启用评论</label><label class=\"check-row\"><input type=\"checkbox\" name=\"commentModeration\" " + (s.commentModeration ? "checked" : "") + "> 审核后发布</label></div>" + field("屏蔽词（逗号分隔）", '<textarea name="bannedWords" rows="3">' + esc(s.bannedWords) + "</textarea>", "full") + "</section>" +
     '<section class="settings-section"><h2>AI 简介</h2><div class="form-grid">' +
     field("服务", '<select name="aiProvider" data-ai-provider>' + selectProvider(s.aiProvider) + "</select>") +
-    field("模型", '<input name="aiModel" value="' + esc(s.aiModel) + '" placeholder="' + esc(preset.model || "必填") + '" data-ai-model>') +
-    field("接口地址（选填）", '<input name="aiBaseUrl" value="' + esc(s.aiBaseUrl) + '" placeholder="' + esc(preset.baseUrl || "必填，例如 https://api.example.com/v1") + '" data-ai-base>') +
     field(
-      "API Key（仅自定义接口需要）",
+      preset.model ? "模型" : "模型（必填）",
+      '<input name="aiModel" value="' + esc(s.aiModel) + '" placeholder="' + esc(preset.model || "例如 gpt-4o-mini") + '" data-ai-model>',
+    ) +
+    field(
+      // 预设供应商自带接口地址，这一栏只是覆盖用；自定义接口没地址就调不通，必须标必填
+      preset.baseUrl ? "接口地址（选填）" : "接口地址（必填）",
+      '<input name="aiBaseUrl" value="' + esc(s.aiBaseUrl) + '" placeholder="' + esc(preset.baseUrl || "例如 https://api.example.com/v1") + '" data-ai-base>',
+    ) +
+    field(
+      preset.protocol === "pollinations" ? "API Key（当前服务无需密钥）" : "API Key",
       '<div class="key-field"><input name="aiApiKey" type="password" autocomplete="new-password" maxlength="300" placeholder="' +
-        (state.aiApiKeySet ? "已保存在设置中，留空表示不修改" : "留空则读取环境变量里的密钥") +
-        '"><button type="button" class="admin-text-btn" data-action="clear-ai-key"' + (state.aiApiKeySet ? "" : " hidden") + ">清除</button></div>",
+        (state.aiKeySaved[s.aiProvider]
+          ? "已保存，留空表示不修改"
+          : preset.protocol === "pollinations"
+            ? "该服务免费，无需填写"
+            : "粘贴 " + esc(preset.label) + " 的 API Key") +
+        '"' + (preset.protocol === "pollinations" ? " disabled" : "") +
+        '><button type="button" class="admin-text-btn" data-action="clear-ai-key"' + (state.aiKeySaved[s.aiProvider] ? "" : " hidden") + ">清除</button></div>",
     ) +
     "</div>" +
-    '<p class="admin-muted">' +
-    (aiConfigured ? "已检测到密钥：" + esc(aiConfigured) : "未检测到 AI 密钥，保存书签时不会自动生成简介。") +
-    " 环境变量名：QWEN_API_KEY / DASHSCOPE_API_KEY、ARK_API_KEY、DEEPSEEK_API_KEY、GEMINI_API_KEY、AI_API_KEY。</p>" +
+    '<div data-ai-key-status>' + renderAiKeyStatus(s.aiProvider) + "</div>" +
     '<div class="md-field-head"><span>提示词模板</span><button type="button" class="admin-text-btn" data-action="reset-ai-prompt">恢复默认</button></div>' +
     '<textarea name="aiPrompt" rows="12" spellcheck="false" class="ai-prompt">' + esc(s.aiPrompt) + "</textarea>" +
-    '<p class="admin-muted">可用变量：' + esc(promptVars) + "。某一行引用的变量为空时，该行会被自动省略。</p>" +
-    '<p class="admin-muted">保存书签时如果简介留空，会在响应返回后由后台任务生成，列表里显示「AI 生成中」；失败原因会记在书签行上，点一下即可重试。</p>' +
+    '<div class="ai-vars"><span class="ai-vars__label">可用变量</span>' + promptVars + "</div>" +
+    '<p class="admin-muted">某一行引用的变量为空时，该行会被自动省略。保存书签时如果简介留空，会在响应返回后由后台任务生成，列表里显示「AI 生成中」；失败原因会记在书签行上，点一下即可重试。</p>' +
     "</section>" +
-    '<section class="settings-section"><h2>管理员</h2>' + field("GitHub 管理员（逗号分隔）", '<input name="githubAdmins" value="' + esc(s.githubAdmins) + '">', "full") + '<p class="admin-muted">' + (state.githubOauthConfigured ? "GitHub OAuth 已配置。" : "GitHub OAuth 尚未配置。") + "</p></section>" +
+    '<section class="settings-section settings-section--tight"><h2>Github 管理员</h2>' + renderAdminLogins() + "</section>" +
     '<div class="drawer-actions"><button type="submit" class="admin-button admin-button--primary">保存设置</button></div></form>'
+  );
+}
+
+/**
+ * 「AI 简介」里密钥相关的三点说明。
+ * 单独抽出来是因为清除密钥后要原地刷新这一块 —— 整页重渲染会冲掉表单里其他没保存的修改。
+ * 「已检测到的密钥」= 数据库里已保存的 + 环境变量兜底的，同一个服务只列一次。
+ */
+function renderAiKeyStatus(provider: SiteSettings["aiProvider"]): string {
+  const preset = aiProviderPreset(provider);
+  // 供应商名里已经带了「（免费，无需密钥）」这类说明，直接原样列出即可
+  const detected = AI_PROVIDER_PRESETS.filter((item) => state.aiKeys[item.id]).map((item) => item.label);
+  const notes = [
+    detected.length
+      ? "已检测到的密钥：" + detected.join("、") + "。"
+      : "还没有检测到可用的密钥，保存书签时不会自动生成简介。在上面选一个服务、填好 API Key 即可。",
+    "密钥存在数据库（D1）里，只供服务端调用，接口从不回传明文；环境变量仅在设置里没填时兜底。",
+    preset.docsUrl
+      ? // 括号里的补充说明（如「阿里云百炼」「免费，无需密钥」）放进这句话里读着别扭，去掉
+        '模型名与计费见<a href="' + esc(preset.docsUrl) + '" target="_blank" rel="noopener noreferrer">' +
+        esc(preset.label.replace(/（[^）]*）/g, "")) +
+        "官方文档</a>。"
+      : "",
+  ].filter(Boolean);
+  return '<ul class="admin-notes">' + notes.map((note) => "<li>" + note + "</li>").join("") + "</ul>";
+}
+
+/**
+ * 「管理员」区块：可登录后台的用户只认环境变量 ADMIN_GITHUB_LOGINS，后台只做只读展示。
+ *
+ * 之所以不给输入框：Worker 运行时改不了自己的环境变量，后台若也能写一份，
+ * 就会出现「后台删了、环境变量还在，照样能登录」这种没法解释的现象。
+ * 顺序固定为「OAuth 状态 → 用户名 → 说明」，名单为空时把后果和改法说清楚。
+ */
+function renderAdminLogins(): string {
+  const logins = state.adminLoginsFromEnv;
+  const legacy = (state.settings?.githubAdmins ?? "").trim();
+  const oauth =
+    '<p class="admin-status admin-status--' + (state.githubOauthConfigured ? "ok" : "warn") + '">' +
+    (state.githubOauthConfigured ? "GitHub OAuth 已配置" : "GitHub OAuth 尚未配置，现在无法登录") +
+    "</p>";
+  if (!logins.length) {
+    return (
+      '<div class="admin-meta">' + oauth +
+      '<p class="admin-error">未设置可登录用户：环境变量 <span class="admin-code">ADMIN_GITHUB_LOGINS</span> 为空，' +
+      "现在没有任何人（包括你）能登录后台。改法：Cloudflare → Workers &amp; Pages → 你的 Worker → Settings → " +
+      "Variables and Secrets → 添加（或修改）该变量，值是 GitHub 用户名、多个用英文逗号分隔，保存即时生效，不用重新部署。" +
+      (legacy
+        ? "（检测到旧版在后台填写的名单：" + esc(legacy) + "，已不再生效，请把它加到环境变量里。）"
+        : "") +
+      "</p></div>"
+    );
+  }
+  return (
+    '<div class="admin-meta">' + oauth +
+    '<div class="tag-chips admin-logins">' +
+    logins.map((login) => '<span class="admin-tag">' + esc(login) + "</span>").join("") +
+    "</div>" +
+    '<p class="admin-muted">名单来自环境变量 <span class="admin-code">ADMIN_GITHUB_LOGINS</span>，后台只能查看、不能修改，' +
+    "增删请到 Cloudflare 控制台的 Variables and Secrets 操作，保存即时生效。" +
+    (legacy ? "旧版在后台填写的名单（" + esc(legacy) + "）已不再生效。" : "") +
+    "</p></div>"
   );
 }
 
@@ -2297,13 +2382,38 @@ function applyProviderHint(resetValues: boolean): void {
   const model = $<HTMLInputElement>("input[data-ai-model]");
   const base = $<HTMLInputElement>("input[data-ai-base]");
   if (model) {
-    model.placeholder = preset.model || "必填";
+    model.placeholder = preset.model || "例如 gpt-4o-mini";
+    const label = model.closest("label")?.querySelector("span");
+    if (label) label.textContent = preset.model ? "模型" : "模型（必填）";
     if (resetValues) model.value = preset.model;
   }
   if (base) {
-    base.placeholder = preset.baseUrl || "必填，例如 https://api.example.com/v1";
+    base.placeholder = preset.baseUrl || "例如 https://api.example.com/v1";
+    const label = base.closest("label")?.querySelector("span");
+    if (label) label.textContent = preset.baseUrl ? "接口地址（选填）" : "接口地址（必填）";
     if (resetValues) base.value = "";
   }
+  // 密钥是按供应商分别保存的，切换服务时要换成该服务的状态，避免误以为上一个密钥还能用
+  const keyInput = $<HTMLInputElement>('input[name="aiApiKey"]');
+  if (keyInput) {
+    const saved = Boolean(state.aiKeySaved[preset.id]);
+    const needsKey = preset.protocol !== "pollinations";
+    keyInput.value = "";
+    keyInput.disabled = !needsKey;
+    keyInput.placeholder = saved
+      ? "已保存，留空表示不修改"
+      : needsKey
+        ? "粘贴 " + preset.label + " 的 API Key"
+        : "该服务免费，无需填写";
+    const clearBtn = $<HTMLButtonElement>('button[data-action="clear-ai-key"]');
+    if (clearBtn) clearBtn.hidden = !saved;
+    const label = keyInput.closest("label")?.querySelector("span");
+    if (label) label.textContent = needsKey ? "API Key" : "API Key（当前服务无需密钥）";
+  }
+  // 「模型名与计费见 XX 官方文档」这句也跟当前服务绑着，切换时要一起换掉，
+  // 否则切到千问、火山，说明还指着 DeepSeek 的文档
+  const status = $<HTMLElement>("[data-ai-key-status]");
+  if (status) status.innerHTML = renderAiKeyStatus(preset.id);
 }
 
 function bindSettings(): void {
@@ -2505,7 +2615,6 @@ async function submitSettingsForm(form: HTMLFormElement): Promise<void> {
     aiModel: formValue(data, "aiModel"),
     aiBaseUrl: formValue(data, "aiBaseUrl"),
     aiPrompt: formValue(data, "aiPrompt"),
-    githubAdmins: formValue(data, "githubAdmins"),
   };
   // 密钥留空表示“不修改”：只有真的填写了才提交，避免覆盖已保存的密钥
   const apiKey = formValue(data, "aiApiKey");
@@ -2556,13 +2665,41 @@ document.addEventListener("click", (event) => {
 });
 
 async function clearAiKey(): Promise<void> {
+  const select = $<HTMLSelectElement>("select[data-ai-provider]");
+  const provider = (select?.value ?? state.settings?.aiProvider ?? "custom") as SiteSettings["aiProvider"];
   try {
-    await api("/api/admin/settings", { method: "PUT", body: { aiApiKey: "" } });
-    toast("已清除自定义接口密钥");
-    await loadSettings();
+    const data = await api<AdminSettingsPayload>("/api/admin/settings", {
+      method: "PUT",
+      body: { aiApiKey: "", aiProvider: provider },
+    });
+    // 只刷新密钥相关的控件：整页重渲染会把表单里其他没保存的修改一起冲掉
+    state.aiKeys = data.aiKeys as unknown as Record<string, boolean>;
+    state.aiKeySaved = data.aiKeySaved ?? {};
+    toast("已清除该服务的密钥");
+    refreshAiKeyUi(provider);
   } catch (error) {
     toast(error instanceof Error ? error.message : "清除失败", "error");
   }
+}
+
+/** 清除密钥后原地更新「密钥输入框 / 清除按钮 / 三点说明」，不动表单其余部分 */
+function refreshAiKeyUi(provider: SiteSettings["aiProvider"]): void {
+  const preset = aiProviderPreset(provider);
+  const saved = Boolean(state.aiKeySaved[provider]);
+  const needsKey = preset.protocol !== "pollinations";
+  const keyInput = $<HTMLInputElement>('input[name="aiApiKey"]');
+  if (keyInput) {
+    keyInput.value = "";
+    keyInput.placeholder = saved
+      ? "已保存，留空表示不修改"
+      : needsKey
+        ? "粘贴 " + preset.label + " 的 API Key"
+        : "该服务免费，无需填写";
+  }
+  const clearBtn = $<HTMLButtonElement>('button[data-action="clear-ai-key"]');
+  if (clearBtn) clearBtn.hidden = !saved;
+  const status = $<HTMLElement>("[data-ai-key-status]");
+  if (status) status.innerHTML = renderAiKeyStatus(provider);
 }
 
 function resetAiPrompt(): void {

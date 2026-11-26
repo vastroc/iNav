@@ -251,6 +251,13 @@ export async function loadSettings(db: D1Database): Promise<SiteSettings> {
   }
   const pick = (key: string, fallback: string) => values[key] ?? fallback;
   const rawProvider = pick("ai_provider", DEFAULT_SETTINGS.aiProvider) as AiProvider;
+  // 各供应商的密钥存在 settings 表里，键名为 ai_key_<provider>；旧版只有 ai_api_key 一栏（对应自定义接口）
+  const aiKeys: Partial<Record<AiProvider, string>> = {};
+  for (const provider of AI_PROVIDERS) {
+    const saved = values[`ai_key_${provider}`];
+    if (saved) aiKeys[provider] = saved;
+  }
+  if (!aiKeys.custom && values.ai_api_key) aiKeys.custom = values.ai_api_key;
   return {
     siteName: pick("site_name", DEFAULT_SETTINGS.siteName),
     siteTagline: pick("site_tagline", DEFAULT_SETTINGS.siteTagline),
@@ -261,7 +268,8 @@ export async function loadSettings(db: D1Database): Promise<SiteSettings> {
     aiProvider: AI_PROVIDERS.includes(rawProvider) ? rawProvider : "pollinations",
     aiModel: pick("ai_model", DEFAULT_SETTINGS.aiModel),
     aiBaseUrl: pick("ai_base_url", DEFAULT_SETTINGS.aiBaseUrl),
-    aiApiKey: pick("ai_api_key", DEFAULT_SETTINGS.aiApiKey),
+    aiApiKey: values.ai_api_key ?? DEFAULT_SETTINGS.aiApiKey,
+    aiKeys,
     aiPrompt: pick("ai_prompt", DEFAULT_SETTINGS.aiPrompt) || DEFAULT_AI_PROMPT,
     commentsEnabled: pick("comments_enabled", "1") === "1",
     commentModeration: pick("comment_moderation", "1") === "1",
@@ -589,6 +597,24 @@ export function requestOrigin(request: Request, env: Env): string {
 
 export function githubOauthConfigured(env: Env): boolean {
   return Boolean(env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET);
+}
+
+/**
+ * 可登录后台的 GitHub 用户名，唯一来源是环境变量 ADMIN_GITHUB_LOGINS。
+ *
+ * 为什么只认环境变量：Worker 运行时改不了自己的环境变量，如果后台也能写一份，
+ * 就会出现「后台删掉了、环境变量里还在，照样能登录」这种无法解释的现象。
+ * 所以后台设置页只做只读展示，PUT 接口也不再接收这一项。
+ *
+ * 统一 trim + 小写 + 去重，返回可直接与 GitHub 返回的 login（也转小写）比较。
+ */
+export function adminLoginsFromEnv(env: Env): string[] {
+  const logins = new Set<string>();
+  for (const item of String(env.ADMIN_GITHUB_LOGINS ?? "").split(",")) {
+    const login = item.trim().toLowerCase();
+    if (login) logins.add(login);
+  }
+  return [...logins];
 }
 
 export function escapeXml(value: string): string {
